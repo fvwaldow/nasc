@@ -4,10 +4,21 @@
 \alias{nascSynth}
 \title{Bayesian Network-Aware Synthetic Control}
 \description{
-An R6 class implementing Bayesian Synthetic Control estimators. Supports
-single and multiple treated units, optional covariate adjustment, and
-predictor matching. Stan models are selected automatically based on the
-structure of the supplied data.
+An R6 class implementing Bayesian Synthetic Control estimators with optional
+network/spatial awareness. Supports predictor matching, covariate adjustment,
+and SAR/SDM spatial models via Stan.
+}
+\section{Active bindings}{
+\if{html}{\out{<div class="r6-active-bindings">}}
+\describe{
+\item{\code{timeTiles}}{ggplot2 tile chart of treatment status over time.}
+\item{\code{plotData}}{Tibble with observed and counterfactual outcomes.}
+\item{\code{interventionTime}}{The first treatment period.}
+\item{\code{synthetic}}{ggplot2 plot of observed vs synthetic outcomes.}
+\item{\code{checks}}{MCMC diagnostics from the fitted Stan model.}
+\item{\code{lift}}{Lift draws (if computed).}
+}
+\if{html}{\out{</div>}}
 }
 \section{Methods}{
 \subsection{Public methods}{
@@ -15,83 +26,94 @@ structure of the supplied data.
 \item \href{#method-nascSynth-new}{\code{nascSynth$new()}}
 \item \href{#method-nascSynth-fit}{\code{nascSynth$fit()}}
 \item \href{#method-nascSynth-updateWidth}{\code{nascSynth$updateWidth()}}
-\item \href{#method-nascSynth-summarizeLift}{\code{nascSynth$summarizeLift()}}
 \item \href{#method-nascSynth-effectPlot}{\code{nascSynth$effectPlot()}}
-\item \href{#method-nascSynth-clone}{\code{nascSynth$clone()}}
+\item \href{#method-nascSynth-summarizeLift}{\code{nascSynth$summarizeLift()}}
 }
 }
 \if{html}{\out{<hr>}}
 \if{html}{\out{<a id="method-nascSynth-new"></a>}}
-\if{latex}{\out{\hypertarget{method-nascSynth-new}{}}}
 \subsection{Method \code{new()}}{
+Create a new nascSynth object.
 \subsection{Usage}{
 \if{html}{\out{<div class="r">}}\preformatted{nascSynth$new(
-  data,
-  time,
-  id,
-  treated,
-  outcome,
+  data, time, id, treated, outcome,
   ci_width = 0.75,
-  covariates0 = NULL,
-  covariates1 = NULL,
-  vs = NULL,
-  W = NULL,
-  spatial_model = "none"
+  covariates = NULL, vs = NULL,
+  W = NULL, spatial_model = "none"
 )}\if{html}{\out{</div>}}
 }
-
-}
-\if{html}{\out{<hr>}}
-\if{html}{\out{<a id="method-nascSynth-fit"></a>}}
-\if{latex}{\out{\hypertarget{method-nascSynth-fit}{}}}
-\subsection{Method \code{fit()}}{
-\subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{nascSynth$fit(...)}\if{html}{\out{</div>}}
-}
-
-}
-\if{html}{\out{<hr>}}
-\if{html}{\out{<a id="method-nascSynth-updateWidth"></a>}}
-\if{latex}{\out{\hypertarget{method-nascSynth-updateWidth}{}}}
-\subsection{Method \code{updateWidth()}}{
-\subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{nascSynth$updateWidth(ci_width = 0.75)}\if{html}{\out{</div>}}
-}
-
-}
-\if{html}{\out{<hr>}}
-\if{html}{\out{<a id="method-nascSynth-summarizeLift"></a>}}
-\if{latex}{\out{\hypertarget{method-nascSynth-summarizeLift}{}}}
-\subsection{Method \code{summarizeLift()}}{
-\subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{nascSynth$summarizeLift()}\if{html}{\out{</div>}}
-}
-
-}
-\if{html}{\out{<hr>}}
-\if{html}{\out{<a id="method-nascSynth-effectPlot"></a>}}
-\if{latex}{\out{\hypertarget{method-nascSynth-effectPlot}{}}}
-\subsection{Method \code{effectPlot()}}{
-\subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{nascSynth$effectPlot(facet = TRUE, subset = NULL)}\if{html}{\out{</div>}}
-}
-
-}
-\if{html}{\out{<hr>}}
-\if{html}{\out{<a id="method-nascSynth-clone"></a>}}
-\if{latex}{\out{\hypertarget{method-nascSynth-clone}{}}}
-\subsection{Method \code{clone()}}{
-The objects of this class are cloneable with this method.
-\subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{nascSynth$clone(deep = FALSE)}\if{html}{\out{</div>}}
-}
-
 \subsection{Arguments}{
 \if{html}{\out{<div class="arguments">}}
 \describe{
-\item{\code{deep}}{Whether to make a deep clone.}
+\item{\code{data}}{Long-format data frame with one row per unit per time period.}
+\item{\code{time}}{Unquoted name of the time column.}
+\item{\code{id}}{Unquoted name of the unit identifier column.}
+\item{\code{treated}}{Unquoted name of the binary treatment indicator (1/0).}
+\item{\code{outcome}}{Unquoted name of the outcome column.}
+\item{\code{ci_width}}{Credible interval width between 0 and 1. Default 0.75.}
+\item{\code{covariates}}{Optional long-format data frame of time-varying
+covariates (same \code{time} and \code{id} columns as \code{data}).
+Pre-treatment means are appended as extra matching predictors.}
+\item{\code{vs}}{Optional numeric vector of predictor importance weights.}
+\item{\code{W}}{Optional spatial weights matrix with row/column names matching
+unit IDs. Required for SAR/SDM models.}
+\item{\code{spatial_model}}{One of \code{"none"} (default), \code{"SAR"}, or \code{"SDM"}.}
 }
 \if{html}{\out{</div>}}
+}
+}
+\if{html}{\out{<hr>}}
+\if{html}{\out{<a id="method-nascSynth-fit"></a>}}
+\subsection{Method \code{fit()}}{
+Fit the Stan model via MCMC.
+\subsection{Usage}{
+\if{html}{\out{<div class="r">}}\preformatted{nascSynth$fit(...)}\if{html}{\out{</div>}}
+}
+\subsection{Arguments}{
+\if{html}{\out{<div class="arguments">}}
+\describe{
+\item{\code{...}}{Additional arguments passed to \code{\link[rstan:sampling]{rstan::sampling()}}.}
+}
+\if{html}{\out{</div>}}
+}
+}
+\if{html}{\out{<hr>}}
+\if{html}{\out{<a id="method-nascSynth-updateWidth"></a>}}
+\subsection{Method \code{updateWidth()}}{
+Update the credible interval width and recompute plot data.
+\subsection{Usage}{
+\if{html}{\out{<div class="r">}}\preformatted{nascSynth$updateWidth(ci_width = 0.75)}\if{html}{\out{</div>}}
+}
+\subsection{Arguments}{
+\if{html}{\out{<div class="arguments">}}
+\describe{
+\item{\code{ci_width}}{New width between 0 and 1.}
+}
+\if{html}{\out{</div>}}
+}
+}
+\if{html}{\out{<hr>}}
+\if{html}{\out{<a id="method-nascSynth-effectPlot"></a>}}
+\subsection{Method \code{effectPlot()}}{
+Plot the estimated treatment effect (tau) over time.
+\subsection{Usage}{
+\if{html}{\out{<div class="r">}}\preformatted{nascSynth$effectPlot(facet = TRUE, subset = NULL)}\if{html}{\out{</div>}}
+}
+\subsection{Arguments}{
+\if{html}{\out{<div class="arguments">}}
+\describe{
+\item{\code{facet}}{Logical; facet by unit.}
+\item{\code{subset}}{Optional character vector of unit IDs.}
+}
+\if{html}{\out{</div>}}
+}
+}
+\if{html}{\out{<hr>}}
+\if{html}{\out{<a id="method-nascSynth-summarizeLift"></a>}}
+\subsection{Method \code{summarizeLift()}}{
+Summarise the posterior lift.
+\subsection{Usage}{
+\if{html}{\out{<div class="r">}}\preformatted{nascSynth$summarizeLift()}\if{html}{\out{</div>}}
 }
 }
 }

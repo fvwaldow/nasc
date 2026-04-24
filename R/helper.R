@@ -1,5 +1,22 @@
 # Helper Functions
 
+# Creates a tile chart of treatment status over time and unit.
+# `time`, `id`, and `status` must be quosures.
+.time_tiles <- function(data, time, id, status) {
+  ggplot2::ggplot(data, ggplot2::aes(x = !!time, y = !!id, fill = !!status)) +
+    ggplot2::geom_tile() +
+    ggplot2::scale_fill_manual(
+      values = c("Treated" = "#E74C3C", "Untreated" = "#BDC3C7", "N/A" = "gray90"),
+      drop   = FALSE
+    ) +
+    ggplot2::theme_minimal(base_size = 12) +
+    ggplot2::theme(legend.title = ggplot2::element_blank()) +
+    ggplot2::labs(
+      x = rlang::as_name(time),
+      y = rlang::as_name(id)
+    )
+}
+
 .get_par_long <- function(fit, par) {
   par <- rlang::enquo(par)
   long_tlb <- fit |>
@@ -16,6 +33,46 @@
     ))) |>
     dplyr::as_tibble()
   return(long_tlb)
+}
+
+# Post-processing for SAR/SDM models: extracts tau_nasc draws and builds
+# plot_data in the same format as .get_plot_df().
+.get_nasc_results <- function(fit, pre_data, post_data, time, outcome, ci = 0.75) {
+  # tau_nasc draws: [n_draws, T_post]
+  tau_draws <- rstan::extract(fit, pars = "tau_nasc")[[1]]
+
+  post_times <- post_data |> dplyr::pull(!!time)
+
+  tau_summary <- tibble::tibble(
+    !!rlang::as_name(time) := post_times,
+    tau    = apply(tau_draws, 2, mean),
+    tau_LB = apply(tau_draws, 2, \(x) stats::quantile(x, (1 - ci) / 2)),
+    tau_UB = apply(tau_draws, 2, \(x) stats::quantile(x, 1 - (1 - ci) / 2))
+  )
+
+  # Compute y_synth = observed - tau (invert for ribbon: LB/UB swap)
+  post_outcome <- post_data |> dplyr::select(!!time, !!outcome)
+  post_plot <- dplyr::inner_join(tau_summary, post_outcome,
+    by = rlang::as_name(time)
+  ) |>
+    dplyr::mutate(
+      y_synth = !!outcome - tau,
+      LB      = !!outcome - tau_UB,
+      UB      = !!outcome - tau_LB
+    ) |>
+    dplyr::select(!!time, !!outcome, y_synth, LB, UB, tau, tau_LB, tau_UB)
+
+  # Pre-period: tau = 0 by definition (no treatment)
+  pre_plot <- pre_data |>
+    dplyr::select(!!time, !!outcome) |>
+    dplyr::mutate(
+      y_synth = !!outcome,
+      LB = !!outcome, UB = !!outcome,
+      tau = 0, tau_LB = 0, tau_UB = 0
+    ) |>
+    dplyr::select(!!time, !!outcome, y_synth, LB, UB, tau, tau_LB, tau_UB)
+
+  dplyr::bind_rows(pre_plot, post_plot)
 }
 
 .get_synth_draws <- function(fit, pre_data, post_data, time, outcome) {
