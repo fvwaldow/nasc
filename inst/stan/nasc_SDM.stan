@@ -1,4 +1,4 @@
-// Bayesian Network-Aware Synthetic Control (NASC) Model
+// Optimized Bayesian Network-Aware Synthetic Control (NASC) Model
 // Spatial Durbin Model (SDM) Estimation
 
 data {
@@ -13,6 +13,7 @@ data {
   int<lower=1> T0;               // Pre-treatment time periods
   matrix[J + 1, T0] Y_panel;     // Full outcome matrix (Treated + Donors)
   matrix[J + 1, J + 1] W;        // Full row-standardized weight matrix
+  vector[J + 1] lambda_W;        // Pre-calculated eigenvalues passed from R
 
   // 3. Submatrices for NASC penalty (derived from W)
   matrix[J, J] W_J;              // Donor-to-donor submatrix
@@ -26,7 +27,6 @@ data {
 
 transformed data {
   matrix[J, J] I_J = diag_matrix(rep_vector(1.0, J));
-  matrix[J + 1, J + 1] I_full = diag_matrix(rep_vector(1.0, J + 1));
 
   // Standardize predictors for SC Matching
   matrix[K_pred, J] X0_std;
@@ -37,7 +37,10 @@ transformed data {
     X1_std[k] = X1[k] / sd_k;
   }
 
-  // --- NEW: Prepare Covariates for SDM ---
+  // --- OPTIMIZATION: Precompute the spatial lag of Y ---
+  matrix[J + 1, T0] WY_panel = W * Y_panel;
+
+  // Prepare Covariates for SDM
   // Combine treated and donor covariates into one (J+1 x K) matrix
   matrix[J + 1, K_pred] X_full_std;
   for (k in 1:K_pred) {
@@ -45,8 +48,10 @@ transformed data {
     X_full_std[J + 1, k] = X1_std[k];            // Treated is J+1
   }
 
-  // Pre-calculate the spatial lag of covariates (W * X)
+  // --- OPTIMIZATION: Pre-calculate the spatial lag of covariates (W * X) ---
   matrix[J + 1, K_pred] WX_full_std = W * X_full_std;
+
+  real epsilon = 1e-8;
 }
 
 parameters {
@@ -76,33 +81,35 @@ transformed parameters {
 
 model {
   // --- Priors ---
-  rho ~ uniform(-1, 1);
+  rho ~ normal(0, 0.5);
   mu ~ normal(0, 10);
-  sigma_sdm ~ cauchy(0, 5);
+  sigma_sdm ~ normal(0, 5);
   beta ~ normal(0, 5);           // Prior for X coefficients
   theta ~ normal(0, 5);          // Prior for WX coefficients
 
-  sigma_sc ~ cauchy(0, 5);
-  lambda ~ cauchy(0, 10);
+  sigma_sc ~ normal(0, 5);
+  lambda ~ normal(0, 10);
   gamma_imp ~ dirichlet(vs);
 
-  // --- 1. SDM Likelihood (Estimates rho, beta, theta) ---
+  // --- 1. OPTIMIZED SDM Likelihood ---
   {
-    matrix[J + 1, J + 1] A = I_full - rho * W;
-    real log_det_A = log_determinant(A);
+    // Fast Log-Determinant using Eigenvalues
+    real log_det_A = sum(log(1 - rho * lambda_W));
+    target += T0 * log_det_A;
+
+    // Evaluate (I - rho*W)Y efficiently using the precomputed WY_panel
+    matrix[J + 1, T0] AY = Y_panel - rho * WY_panel;
 
     // Calculate the SDM expected mean: mu + X*beta + WX*theta
     vector[J + 1] sdm_mean = mu + X_full_std * beta + WX_full_std * theta;
 
-    for (t in 1:T0) {
-      target += log_det_A; // Jacobian adjustment
-      // SDM: (I - rho*W)Y_t = mu + X*beta + WX*theta + epsilon
-      target += normal_lpdf(A * Y_panel[, t] | sdm_mean, sigma_sdm);
-    }
+    // Fully Vectorized Likelihood:
+    // rep_matrix copies the mean vector T0 times. to_vector flattens the arrays.
+    target += normal_lpdf(to_vector(AY) | to_vector(rep_matrix(sdm_mean, T0)), sigma_sdm);
   }
 
   // --- 2. NASC Regularization ---
-  target += -lambda * dot_product(w, fabs(s));
+  target += -lambda * dot_product(w, sqrt(square(s) + epsilon));
 
   // --- 3. SC Likelihood (Predictor Match) ---
   target += normal_lpdf(X1_std | X0_std * w, Omega);

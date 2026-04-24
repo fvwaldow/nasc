@@ -267,6 +267,8 @@ nascSynth <- R6::R6Class(
         W_J  <- W_ordered[1:J,     1:J    ]
         w_J1 <- W_ordered[1:J,     J + 1  ]
 
+        lambda_W <- Re(eigen(W_ordered)$values)
+
         Y_panel_df <- pre_data |>
           dplyr::select(dplyr::all_of(donor_ids), !!private$outcome)
         Y_panel <- t(as.matrix(Y_panel_df))
@@ -280,6 +282,7 @@ nascSynth <- R6::R6Class(
           T0      = nrow(pre_data),
           Y_panel = Y_panel,
           W       = W_ordered,
+          lambda_W = lambda_W,
           W_J     = W_J,
           w_J1    = as.vector(w_J1),
           T_post  = nrow(post_data),
