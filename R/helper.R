@@ -35,11 +35,23 @@
   return(long_tlb)
 }
 
-# Post-processing for SAR/SDM models: extracts tau_nasc draws and builds
-# plot_data in the same format as .get_plot_df().
-.get_nasc_results <- function(tau_draws, y_sim_pre_draws, pre_data, post_data, time, outcome, ci = 0.75) {
+
+
+# Post-processing for SAR/SDM models: extracts y_counterfactual draws,
+# calculates tau dynamically, and builds plot_data.
+.get_nasc_results <- function(y_counterfactual_draws, bias_correction_draws, y_sim_pre_draws, pre_data, post_data, time, outcome, ci = 0.75) {
   # --- 1. POST-TREATMENT PERIOD ---
   post_times <- post_data |> dplyr::pull(!!time)
+  Y1_post    <- post_data |> dplyr::pull(!!outcome)
+
+  # Replicate the post-treatment outcome to match the dimensions of the draws matrix
+  # (Rows = draws, Columns = time periods)
+  Y1_mat <- matrix(Y1_post, nrow = nrow(y_counterfactual_draws), ncol = length(Y1_post), byrow = TRUE)
+
+  # Calculate tau draws dynamically: tau_nasc = (Y1_post - y_counterfactual) * bias_correction
+  # Note: Due to R's column-major matrix memory layout, multiplying an N x T matrix
+  # by an N-length vector correctly multiplies each column element-wise by the vector.
+  tau_draws <- (Y1_mat - y_counterfactual_draws) * bias_correction_draws
 
   tau_summary <- tibble::tibble(
     !!rlang::as_name(time) := post_times,
@@ -84,6 +96,9 @@
   dplyr::bind_rows(pre_plot, post_plot)
 }
 
+
+
+
 .get_synth_draws <- function(fit, pre_data, post_data, time, outcome) {
   y_sim_draws <- .get_par_long(fit = fit, par = y_sim)
   dateXwalk <- pre_data |>
@@ -115,125 +130,6 @@
 
 
 
-.get_synth_draws_predictor_match <- function(fit, pre_data,
-                                             post_data, time, outcome) {
-  X1_sim_draws <- .get_par_long(fit = fit, par = X1_sim)
-  dateXwalk <- pre_data |>
-    dplyr::mutate(idx = 1:dplyr::n()) |>
-    dplyr::select(idx, !!time)
-  y_hat <- dplyr::inner_join(X1_sim_draws, dateXwalk, by = "idx") |>
-    dplyr::rename(y_synth = X1_sim)
-
-  X1_pred_draws <- .get_par_long(fit = fit, par = X1_pred)
-  dateXwalk <- post_data |>
-    dplyr::mutate(idx = 1:dplyr::n()) |>
-    dplyr::select(idx, !!time)
-  X1_pred_hat <- dplyr::inner_join(X1_pred_draws, dateXwalk, by = "idx") |>
-    dplyr::rename(y_synth = X1_pred)
-
-  y_synth <- dplyr::bind_rows(y_hat, X1_pred_hat) |>
-    dplyr::select(-idx)
-
-  pre_outcome <- pre_data |>
-    dplyr::select(!!outcome, !!time)
-  post_outcome <- post_data |>
-    dplyr::select(!!outcome, !!time)
-
-  y <- dplyr::bind_rows(pre_outcome, post_outcome)
-  y_synth <- dplyr::full_join(y_synth, y, by = rlang::as_name(time))
-  return(y_synth)
-}
-
-
-
-.get_synth_draws3d <- function(fit, data, id, treated_ids, time, outcome,
-                               intervention) {
-  y_sim_draws <-
-    .get_draws3d(
-      fit = fit,
-      data = data,
-      id = id,
-      treated_ids = treated_ids,
-      time = time,
-      outcome = outcome,
-      intervention = intervention,
-      period = "pre"
-    )
-
-  y_pred_draws <-
-    .get_draws3d(
-      fit = fit,
-      data = data,
-      id = id,
-      treated_ids = treated_ids,
-      time = time,
-      outcome = outcome,
-      intervention = intervention,
-      period = "post"
-    )
-
-  y_draws <- dplyr::bind_rows(y_sim_draws, y_pred_draws)
-
-  return(y_draws)
-}
-
-
-
-.get_draws3d <- function(fit, data, id, treated_ids, time, outcome,
-                         intervention, period = c("pre", "post")) {
-  period <- match.arg(period)
-  if (period == "pre") {
-    y_sim_draws <- rstan::extract(fit, pars = "y_sim")[[1]]
-    data <- data |>
-      dplyr::filter(!!time < intervention)
-  } else {
-    y_sim_draws <- rstan::extract(fit, pars = "y_pred")[[1]]
-    data <- data |>
-      dplyr::filter(!!time >= intervention)
-  }
-
-  dimnames(y_sim_draws) <- list(
-    "draw" = seq(1, dim(y_sim_draws)[[1]]),
-    "i_idx" = seq(1, dim(y_sim_draws)[[2]]),
-    "t_idx" = seq(1, dim(y_sim_draws)[[3]])
-  )
-
-  y_sim_draws <- y_sim_draws |>
-    cubelyr::as.tbl_cube() |>
-    tibble::as_tibble() |>
-    dplyr::rename(y_hat = 4)
-
-  wide_df_treated <- data |>
-    dplyr::filter(!!id %in% treated_ids) |>
-    dplyr::select(
-      !!id,
-      !!time,
-      !!outcome
-    ) |>
-    tidyr::pivot_wider(names_from = !!id, values_from = !!outcome) |>
-    dplyr::arrange(!!time)
-
-  iXwalk <- wide_df_treated |>
-    dplyr::select(-!!time) |>
-    colnames() |>
-    dplyr::tibble(id = .) |>
-    dplyr::mutate(i_idx = 1:dplyr::n())
-
-  tXwalk <- wide_df_treated |>
-    dplyr::select(!!time) |>
-    dplyr::mutate(t_idx = 1:dplyr::n())
-
-  y_sim_draws <- y_sim_draws |>
-    dplyr::inner_join(iXwalk, by = "i_idx") |>
-    dplyr::inner_join(tXwalk, by = "t_idx") |>
-    dplyr::select(-i_idx, -t_idx)
-
-  return(y_sim_draws)
-}
-
-
-
-
 .get_plot_df <- function(y_synth_draws, pre_data,
                          post_data, time, outcome, ci = 0.75) {
   y_synth <- y_synth_draws |>
@@ -256,54 +152,6 @@
     ) |>
     dplyr::select(!!time, !!outcome, y_synth, LB, UB, tau, tau_LB, tau_UB)
   return(df_plot_all)
-}
-
-
-
-
-.get_plot_df2 <- function(y_synth_draws, data, treated_ids,
-                          id, time, outcome, ci = 0.75) {
-  data_treated <- data |>
-    dplyr::filter(!!id %in% treated_ids) |>
-    dplyr::select(!!id, !!time, !!outcome) |>
-    dplyr::mutate(!!rlang::as_label(id) := as.character(!!id))
-
-  ate <- data_treated |>
-    dplyr::inner_join(y_synth_draws, by = c(
-      rlang::as_name(id),
-      rlang::as_name(time)
-    )) |>
-    dplyr::mutate(diff = !!outcome - y_hat) |>
-    dplyr::group_by(!!time, draw) |>
-    dplyr::summarise(diff_draw = mean(diff)) |>
-    dplyr::group_by(!!time) |>
-    dplyr::summarise(
-      tau = mean(diff_draw),
-      tau_LB = stats::quantile(diff_draw, (1 - ci) / 2),
-      tau_UB = stats::quantile(diff_draw, 1 - (1 - ci) / 2)
-    ) |>
-    dplyr::mutate(id = "Average")
-
-  y_synth_i <- y_synth_draws |>
-    dplyr::group_by(!!time, !!id) |>
-    dplyr::summarise(
-      LB = stats::quantile(y_hat, (1 - ci) / 2),
-      UB = stats::quantile(y_hat, 1 - (1 - ci) / 2),
-      y_synth = mean(y_hat)
-    )
-
-  df_plot_i <- y_synth_i |>
-    dplyr::inner_join(data_treated, by = c(
-      rlang::as_name(id),
-      rlang::as_name(time)
-    )) |>
-    dplyr::mutate(
-      tau = !!outcome - y_synth,
-      tau_LB = !!outcome - UB,
-      tau_UB = !!outcome - LB
-    )
-  df_plot <- dplyr::bind_rows(df_plot_i, ate)
-  return(df_plot)
 }
 
 

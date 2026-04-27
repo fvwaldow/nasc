@@ -14,7 +14,6 @@ nascSynth <- R6::R6Class(
   private = list(
     data = NULL,
     covariates = NULL,
-    vs = NULL,
     W = NULL,
     spatial_model = NULL,
     time = NULL,
@@ -81,7 +80,7 @@ nascSynth <- R6::R6Class(
     #' @description
     #' Create a new nascSynth object.
     initialize = function(data, time, id, treated, outcome, ci_width = 0.75,
-                          covariates = NULL, vs = NULL,
+                          covariates = NULL,
                           W = NULL, spatial_model = "none") {
 
       stopifnot(ci_width > 0 & ci_width < 1)
@@ -92,6 +91,14 @@ nascSynth <- R6::R6Class(
       if (spatial_model %in% c("SAR", "SDM") && is.null(W)) {
         stop("A spatial weights matrix 'W' is required for SAR/SDM models.")
       }
+      if (!is.null(W)) {
+        W_mat <- as.matrix(W)
+        rsums <- rowSums(W_mat, na.rm = TRUE)
+        is_row_standardized <- all(abs(rsums - 1) < 1e-6 | abs(rsums) < 1e-6)
+        if (!is_row_standardized) {
+          stop("The spatial weights matrix 'W' must be row-standardized (row sums must equal 1, or 0 for isolated units).")
+        }
+      }
 
       private$time    <- rlang::enquo(time)
       private$id      <- rlang::enquo(id)
@@ -99,7 +106,6 @@ nascSynth <- R6::R6Class(
       private$outcome <- rlang::enquo(outcome)
       private$ci_width     <- ci_width
       private$covariates   <- covariates
-      private$vs           <- vs
       private$W            <- W
       private$spatial_model <- spatial_model
 
@@ -229,10 +235,6 @@ nascSynth <- R6::R6Class(
         X1 <- c(X1, unlist(cov_wide[, treated_col, drop = TRUE]))
       }
 
-      if (is.null(private$vs)) {
-        private$vs <- rep(1, nrow(X))
-      }
-
       if (private$spatial_model %in% c("SAR", "SDM")) {
 
         # ---- Build covariate matrices from private$covariates ONLY ----
@@ -280,15 +282,6 @@ nascSynth <- R6::R6Class(
           stop("Missing values found in predictor matrix; please impute or drop.")
         }
 
-        # ---- Predictor importance weights ----
-        if (is.null(private$vs)) {
-          private$vs <- rep(1, K_pred)
-        } else if (length(private$vs) != K_pred) {
-          stop(sprintf("Length of 'vs' (%d) must equal number of predictors (%d).",
-                       length(private$vs), K_pred))
-        }
-        if (any(private$vs < 0)) stop("'vs' must be non-negative.")
-
         # ---- Spatial weights matrix ----
         if (is.null(rownames(private$W)) || is.null(colnames(private$W))) {
           all_ids <- levels(private$data[[rlang::as_name(private$id)]])
@@ -311,7 +304,6 @@ nascSynth <- R6::R6Class(
           X1       = X1_vec,
           J        = J,
           X0       = X0_mat,
-          vs       = as.numeric(private$vs),
           T0       = nrow(pre_data),
           Y_panel  = t(as.matrix(
             pre_data |> dplyr::select(dplyr::all_of(donor_ids), !!private$outcome)
@@ -337,55 +329,109 @@ nascSynth <- R6::R6Class(
           ...
         )
 
-        rho_draws    <- rstan::extract(private$fitted, pars = "rho")$rho
-        sampled_rhos <- sample(rho_draws, size = min(n_samples, length(rho_draws)),
-                               replace = FALSE)
+        # --- STRATIFIED SAMPLING ACROSS CHAINS ---
+        # permuted = FALSE returns an array of [iterations, chains, parameters]
+        rho_array <- rstan::extract(private$fitted, pars = "rho", permuted = FALSE)
 
-        message(sprintf("Running Step 2: Parallel NASC across %d cores...", cores))
-        cl <- parallel::makeCluster(
-          cores,
-          type = if (.Platform$OS.type == "unix") "FORK" else "PSOCK"
-        )
-        on.exit(parallel::stopCluster(cl), add = TRUE)
+        # Get dimensions
+        n_iters  <- dim(rho_array)[1]
+        n_chains <- dim(rho_array)[2]
+
+        # Calculate exactly how many samples to draw per chain
+        samples_per_chain <- ceiling(n_samples / n_chains)
+        sampled_rhos <- numeric(0)
+
+        # Draw evenly across all chains
+        for (c_idx in seq_len(n_chains)) {
+          # Extract the rho vector for this specific chain
+          chain_draws <- rho_array[, c_idx, 1]
+
+          # Sample without replacement
+          take_n <- min(samples_per_chain, n_iters)
+          sampled_rhos <- c(sampled_rhos, sample(chain_draws, size = take_n, replace = FALSE))
+        }
+
+        # If ceiling() caused slight over-sampling (e.g., 100/3 = 34 * 3 = 102),
+        # trim randomly to exactly n_samples
+        if (length(sampled_rhos) > n_samples) {
+          sampled_rhos <- sample(sampled_rhos, size = n_samples, replace = FALSE)
+        }
+        # -----------------------------------------
+
+        message(sprintf("Running Step 2: Parallel NASC across %d cores using furrr...", cores))
+
+        # Save old plan and ensure it gets restored on exit
+        old_plan <- future::plan()
+        on.exit(future::plan(old_plan), add = TRUE)
+
+        # Set up future plan
+        future::plan(future::multisession, workers = cores)
 
         # Worker: now extracts ALL relevant quantities (w, lambda, bias_correction)
         run_nasc_worker <- function(single_rho, base_data, step2_mod) {
-          require(rstan)
+          # Silently load rstan on the worker
+          suppressPackageStartupMessages(require(rstan, quietly = TRUE))
+
           worker_data        <- base_data
           worker_data$rho    <- single_rho
 
+          # Silently run the MCMC sampling
           fit_step2 <- rstan::sampling(
-            object  = step2_mod,
-            data    = worker_data,
-            chains  = 1,
-            iter    = 1000,
-            warmup  = 500,
-            refresh = 0
-          )
+              object        = step2_mod,
+              data          = worker_data,
+              chains        = 1,
+              iter          = 1000,
+              warmup        = 500,
+              refresh       = 0,
+              show_messages = FALSE
+            )
+
+
           draws <- rstan::extract(
             fit_step2,
-            pars = c("tau_nasc", "y_sim_pre", "w", "lambda",
+            pars = c("y_counterfactual", "y_sim_pre", "w", "lambda",
                      "sigma_sc", "bias_correction")
           )
+
           list(
-            tau_nasc        = draws$tau_nasc,
-            y_sim_pre       = draws$y_sim_pre,
-            w               = draws$w,
-            lambda          = draws$lambda,
-            sigma_sc        = draws$sigma_sc,
-            bias_correction = draws$bias_correction,
-            rho_used        = single_rho
+            y_counterfactual = draws$y_counterfactual,
+            y_sim_pre        = draws$y_sim_pre,
+            w                = draws$w,
+            lambda           = draws$lambda,
+            sigma_sc         = draws$sigma_sc,
+            bias_correction  = draws$bias_correction,
+            rho_used         = single_rho
           )
         }
 
-        results_list <- parallel::parLapply(
-          cl, sampled_rhos, run_nasc_worker,
-          base_data = stan_data,
-          step2_mod = private$stan_model$step2
-        )
+        # Activate global handlers so the progress bar shows in the console
+        progressr::handlers(global = TRUE)
+
+        # Wrap the future_map call in with_progress
+        results_list <- progressr::with_progress({
+          # Initialize the progressor with the total number of steps
+          p <- progressr::progressor(steps = length(sampled_rhos))
+
+          furrr::future_map(
+            sampled_rhos,
+            function(rho) {
+              # 1. Run the worker
+              res <- run_nasc_worker(
+                single_rho = rho,
+                base_data  = stan_data,
+                step2_mod  = private$stan_model$step2
+              )
+              # 2. Signal the progress bar that this step is done
+              p()
+              # 3. Return the result
+              return(res)
+            },
+            .options = furrr::furrr_options(seed = TRUE, packages = "rstan")
+          )
+        })
 
         # Aggregate
-        final_tau_nasc        <- do.call(rbind, lapply(results_list, \(x) x$tau_nasc))
+        final_y_cf            <- do.call(rbind, lapply(results_list, \(x) x$y_counterfactual))
         final_y_sim_pre       <- do.call(rbind, lapply(results_list, \(x) x$y_sim_pre))
         final_w               <- do.call(rbind, lapply(results_list, \(x) x$w))
         final_lambda          <- do.call(c,     lapply(results_list, \(x) x$lambda))
@@ -394,7 +440,7 @@ nascSynth <- R6::R6Class(
         rhos_used             <- vapply(results_list, \(x) x$rho_used, numeric(1))
 
         private$y_synth_draws <- list(
-          tau_nasc        = final_tau_nasc,
+          y_counterfactual= final_y_cf, # <--- Changed key and value
           y_sim_pre       = final_y_sim_pre,
           w               = final_w,
           lambda          = final_lambda,
@@ -404,13 +450,14 @@ nascSynth <- R6::R6Class(
         )
 
         private$plot_data <- .get_nasc_results(
-          tau_draws       = final_tau_nasc,
-          y_sim_pre_draws = final_y_sim_pre,
-          pre_data        = pre_data,
-          post_data       = post_data,
-          time            = private$time,
-          outcome         = private$outcome,
-          ci              = private$ci_width
+          y_counterfactual_draws = final_y_cf,            # <--- Update parameter names
+          bias_correction_draws  = final_bias_correction, # <--- Add bias draw parameter
+          y_sim_pre_draws        = final_y_sim_pre,
+          pre_data               = pre_data,
+          post_data              = post_data,
+          time                   = private$time,
+          outcome                = private$outcome,
+          ci                     = private$ci_width
         )
 
       } else {
@@ -471,13 +518,14 @@ nascSynth <- R6::R6Class(
       # Branch depending on whether y_synth_draws is a list (spatial) or df (standard)
       if (private$spatial_model %in% c("SAR", "SDM")) {
         private$plot_data <- .get_nasc_results(
-          tau_draws       = private$y_synth_draws$tau_nasc,
-          y_sim_pre_draws = private$y_synth_draws$y_sim_pre,
-          pre_data        = pre_data,
-          post_data       = post_data,
-          time            = private$time,
-          outcome         = private$outcome,
-          ci              = private$ci_width
+          y_counterfactual_draws = private$y_synth_draws$y_counterfactual,
+          bias_correction_draws  = private$y_synth_draws$bias_correction,
+          y_sim_pre_draws        = private$y_synth_draws$y_sim_pre,
+          pre_data               = pre_data,
+          post_data              = post_data,
+          time                   = private$time,
+          outcome                = private$outcome,
+          ci                     = private$ci_width
         )
       } else {
         private$plot_data <- .get_plot_df(
@@ -519,6 +567,103 @@ nascSynth <- R6::R6Class(
         ymax       = tau_UB,
         xintercept = private$intervention
       )
+    },
+
+    #' @description
+    #' Plot implicit weight distribution across draws.
+    #' @return ggplot object with weight distribution per unit.
+    weightDraws = function() {
+      if (is.null(private$fitted)) stop("Run fit() first.")
+
+      # Extract weights depending on the model type
+      if (private$spatial_model %in% c("SAR", "SDM")) {
+        w_mat <- private$y_synth_draws$w
+      } else {
+        w_mat <- rstan::extract(private$fitted, pars = "w")$w
+      }
+
+      # Get donor names (all unique IDs minus the treated ID)
+      treated_id <- as.character(private$treated_ids)
+      all_ids <- levels(private$data[[rlang::as_name(private$id)]])
+      donor_names <- setdiff(all_ids, treated_id)
+
+      if (ncol(w_mat) != length(donor_names)) {
+        stop("Mismatch between the number of weights and donor names.")
+      }
+
+      colnames(w_mat) <- donor_names
+
+      # Reshape using modern tidyr::pivot_longer
+      melt_w <- as.data.frame(w_mat) |>
+        tidyr::pivot_longer(
+          cols      = dplyr::everything(),
+          names_to  = "ID",
+          values_to = "weight"
+        )
+
+      # Generate Ridge Plot
+      melt_w |>
+        ggplot2::ggplot(ggplot2::aes(x = weight, y = ID, fill = ID)) +
+        ggridges::geom_density_ridges(alpha = 0.7) +
+        ggplot2::theme_minimal() +
+        ggplot2::theme(legend.position = "none") +
+        ggplot2::labs(x = "Donor Weight", y = "Donor Unit")
+    },
+
+    #' @description
+    #' Plots correlations between weights across draws.
+    #' @return ggplot heatmap object with correlations.
+    weightCorr = function() {
+      if (is.null(private$fitted)) stop("Run fit() first.")
+
+      # Extract weights depending on the model type
+      if (private$spatial_model %in% c("SAR", "SDM")) {
+        w_mat <- private$y_synth_draws$w
+      } else {
+        w_mat <- rstan::extract(private$fitted, pars = "w")$w
+      }
+
+      # Get donor names
+      treated_id <- as.character(private$treated_ids)
+      all_ids <- levels(private$data[[rlang::as_name(private$id)]])
+      donor_names <- setdiff(all_ids, treated_id)
+
+      colnames(w_mat) <- donor_names
+
+      # Compute correlation matrix
+      cormat <- round(cor(w_mat), 3)
+      diag(cormat) <- NA # Set diagonal to NA so it doesn't skew the color scale
+
+      # Reshape without depending on reshape2::melt
+      melted_cormat <- as.data.frame(cormat) |>
+        dplyr::mutate(X1 = factor(rownames(cormat), levels = donor_names)) |>
+        tidyr::pivot_longer(
+          cols      = -X1,
+          names_to  = "X2",
+          values_to = "value"
+        ) |>
+        dplyr::mutate(X2 = factor(X2, levels = donor_names))
+
+      # Generate Heatmap
+      ggplot2::ggplot(data = melted_cormat, ggplot2::aes(x = X1, y = X2, fill = value)) +
+        ggplot2::geom_tile(color = "white") +
+        ggplot2::scale_fill_gradient2(
+          low      = "red",
+          mid      = "white",
+          high     = "green",
+          midpoint = 0,
+          limit    = c(-1, 1),
+          space    = "Lab",
+          name     = "Corr",
+          na.value = "transparent"
+        ) +
+        ggplot2::theme_minimal() +
+        ggplot2::theme(
+          axis.text.x      = ggplot2::element_text(angle = 90, vjust = 0.5, hjust = 1),
+          panel.grid.major = ggplot2::element_blank(),
+          panel.grid.minor = ggplot2::element_blank()
+        ) +
+        ggplot2::labs(x = "Donor Units", y = "Donor Units")
     }
   )
 )

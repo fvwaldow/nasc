@@ -73,7 +73,6 @@ model {
 generated quantities {
   vector[T0] y_sim_pre;             // Pre-treatment fitted values (raw scale)
   vector[T_post] y_counterfactual;  // Post-treatment counterfactual (raw scale)
-  vector[T_post] tau_nasc;          // Treatment effect (raw scale)
 
   real wts_dot = dot_product(w, s);
   real bias_correction = 1.0 / (1.0 - wts_dot);
@@ -89,8 +88,4 @@ generated quantities {
   for (t in 1:T_post) {
     y_counterfactual[t] = normal_rng(dot_product(Y0_post_std[t, ], w), sigma_sc) * sd_y + mean_y;
   }
-
-  // ----------- Treatment effect with bias correction -----------
-  // tau = (Y1_observed - Y_counterfactual) * bias_correction factor
-  tau_nasc = (Y1_post - y_counterfactual) * bias_correction;
 }
