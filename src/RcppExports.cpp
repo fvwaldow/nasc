@@ -12,14 +12,16 @@ Rcpp::Rostream<false>& Rcpp::Rcerr = Rcpp::Rcpp_cerr_get();
 #endif
 
 
-RcppExport SEXP _rcpp_module_boot_stan_fit4model1_gammaOmega_mod();
-RcppExport SEXP _rcpp_module_boot_stan_fit4nasc_SAR_mod();
-RcppExport SEXP _rcpp_module_boot_stan_fit4nasc_SDM_mod();
+RcppExport SEXP _rcpp_module_boot_stan_fit4model1_mod();
+RcppExport SEXP _rcpp_module_boot_stan_fit4stan_1_SAR_NASC_mod();
+RcppExport SEXP _rcpp_module_boot_stan_fit4stan_1_SDM_NASC_mod();
+RcppExport SEXP _rcpp_module_boot_stan_fit4stan_2_NASC_mod();
 
 static const R_CallMethodDef CallEntries[] = {
-    {"_rcpp_module_boot_stan_fit4model1_gammaOmega_mod", (DL_FUNC) &_rcpp_module_boot_stan_fit4model1_gammaOmega_mod, 0},
-    {"_rcpp_module_boot_stan_fit4nasc_SAR_mod", (DL_FUNC) &_rcpp_module_boot_stan_fit4nasc_SAR_mod, 0},
-    {"_rcpp_module_boot_stan_fit4nasc_SDM_mod", (DL_FUNC) &_rcpp_module_boot_stan_fit4nasc_SDM_mod, 0},
+    {"_rcpp_module_boot_stan_fit4model1_mod", (DL_FUNC) &_rcpp_module_boot_stan_fit4model1_mod, 0},
+    {"_rcpp_module_boot_stan_fit4stan_1_SAR_NASC_mod", (DL_FUNC) &_rcpp_module_boot_stan_fit4stan_1_SAR_NASC_mod, 0},
+    {"_rcpp_module_boot_stan_fit4stan_1_SDM_NASC_mod", (DL_FUNC) &_rcpp_module_boot_stan_fit4stan_1_SDM_NASC_mod, 0},
+    {"_rcpp_module_boot_stan_fit4stan_2_NASC_mod", (DL_FUNC) &_rcpp_module_boot_stan_fit4stan_2_NASC_mod, 0},
     {NULL, NULL, 0}
 };
 

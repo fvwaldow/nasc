@@ -2,12 +2,12 @@
 
 #include <Rcpp.h>
 using namespace Rcpp ;
-#include "stanExports_nasc_SAR.h"
+#include "stanExports_stan_1_SAR_NASC.h"
 
-RCPP_MODULE(stan_fit4nasc_SAR_mod) {
+RCPP_MODULE(stan_fit4stan_1_SAR_NASC_mod) {
 
 
-    class_<rstan::stan_fit<stan_model, boost::ecuyer1988> >("rstantools_model_nasc_SAR")
+    class_<rstan::stan_fit<stan_model, boost::ecuyer1988> >("rstantools_model_stan_1_SAR_NASC")
 
     .constructor<SEXP,SEXP,SEXP>()
 

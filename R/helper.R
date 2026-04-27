@@ -37,10 +37,8 @@
 
 # Post-processing for SAR/SDM models: extracts tau_nasc draws and builds
 # plot_data in the same format as .get_plot_df().
-.get_nasc_results <- function(fit, pre_data, post_data, time, outcome, ci = 0.75) {
-  # tau_nasc draws: [n_draws, T_post]
-  tau_draws <- rstan::extract(fit, pars = "tau_nasc")[[1]]
-
+.get_nasc_results <- function(tau_draws, y_sim_pre_draws, pre_data, post_data, time, outcome, ci = 0.75) {
+  # --- 1. POST-TREATMENT PERIOD ---
   post_times <- post_data |> dplyr::pull(!!time)
 
   tau_summary <- tibble::tibble(
@@ -53,7 +51,7 @@
   # Compute y_synth = observed - tau (invert for ribbon: LB/UB swap)
   post_outcome <- post_data |> dplyr::select(!!time, !!outcome)
   post_plot <- dplyr::inner_join(tau_summary, post_outcome,
-    by = rlang::as_name(time)
+                                 by = rlang::as_name(time)
   ) |>
     dplyr::mutate(
       y_synth = !!outcome - tau,
@@ -62,16 +60,27 @@
     ) |>
     dplyr::select(!!time, !!outcome, y_synth, LB, UB, tau, tau_LB, tau_UB)
 
-  # Pre-period: tau = 0 by definition (no treatment)
-  pre_plot <- pre_data |>
-    dplyr::select(!!time, !!outcome) |>
+  # --- 2. PRE-TREATMENT PERIOD ---
+  pre_times <- pre_data |> dplyr::pull(!!time)
+
+  pre_summary <- tibble::tibble(
+    !!rlang::as_name(time) := pre_times,
+    y_synth = apply(y_sim_pre_draws, 2, mean),
+    LB      = apply(y_sim_pre_draws, 2, \(x) stats::quantile(x, (1 - ci) / 2)),
+    UB      = apply(y_sim_pre_draws, 2, \(x) stats::quantile(x, 1 - (1 - ci) / 2))
+  )
+
+  pre_outcome <- pre_data |> dplyr::select(!!time, !!outcome)
+  pre_plot <- dplyr::inner_join(pre_summary, pre_outcome,
+                                by = rlang::as_name(time)) |>
     dplyr::mutate(
-      y_synth = !!outcome,
-      LB = !!outcome, UB = !!outcome,
-      tau = 0, tau_LB = 0, tau_UB = 0
+      tau    = !!outcome - y_synth,
+      tau_LB = !!outcome - UB,
+      tau_UB = !!outcome - LB
     ) |>
     dplyr::select(!!time, !!outcome, y_synth, LB, UB, tau, tau_LB, tau_UB)
 
+  # Combine pre and post data
   dplyr::bind_rows(pre_plot, post_plot)
 }
 
