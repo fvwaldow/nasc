@@ -27,77 +27,78 @@ namespace model_stan_2_NASC_namespace {
 using stan::model::model_base_crtp;
 using namespace stan::math;
 stan::math::profile_map profiles__;
-static constexpr std::array<const char*, 70> locations_array__ =
+static constexpr std::array<const char*, 71> locations_array__ =
   {" (found before start of program)",
-  " (in 'string', line 46, column 2 to column 15)",
-  " (in 'string', line 47, column 2 to column 25)",
-  " (in 'string', line 48, column 2 to column 23)",
-  " (in 'string', line 60, column 2 to column 23)",
-  " (in 'string', line 61, column 2 to column 34)",
-  " (in 'string', line 62, column 2 to column 35)",
-  " (in 'string', line 63, column 2 to column 47)",
-  " (in 'string', line 67, column 4 to column 88)",
-  " (in 'string', line 66, column 18 to line 68, column 3)",
-  " (in 'string', line 66, column 2 to line 68, column 3)",
-  " (in 'string', line 72, column 4 to column 97)",
-  " (in 'string', line 71, column 22 to line 73, column 3)",
-  " (in 'string', line 71, column 2 to line 73, column 3)",
-  " (in 'string', line 52, column 2 to column 26)",
-  " (in 'string', line 53, column 2 to column 27)",
-  " (in 'string', line 55, column 2 to column 44)",
-  " (in 'string', line 57, column 2 to column 61)",
-  " (in 'string', line 5, column 2 to column 17)",
-  " (in 'string', line 6, column 2 to column 18)",
-  " (in 'string', line 7, column 9 to column 14)",
-  " (in 'string', line 7, column 16 to column 18)",
-  " (in 'string', line 7, column 2 to column 28)",
-  " (in 'string', line 8, column 9 to column 10)",
-  " (in 'string', line 8, column 12 to column 13)",
-  " (in 'string', line 8, column 2 to column 19)",
-  " (in 'string', line 9, column 9 to column 10)",
-  " (in 'string', line 9, column 2 to column 17)",
-  " (in 'string', line 10, column 2 to column 22)",
-  " (in 'string', line 11, column 9 to column 15)",
-  " (in 'string', line 11, column 17 to column 18)",
-  " (in 'string', line 11, column 2 to column 28)",
-  " (in 'string', line 12, column 9 to column 15)",
-  " (in 'string', line 12, column 2 to column 25)",
-  " (in 'string', line 14, column 2 to column 30)",
+  " (in 'string', line 55, column 2 to column 15)",
+  " (in 'string', line 56, column 2 to column 25)",
+  " (in 'string', line 57, column 2 to column 23)",
+  " (in 'string', line 69, column 2 to column 23)",
+  " (in 'string', line 70, column 2 to column 34)",
+  " (in 'string', line 71, column 2 to column 35)",
+  " (in 'string', line 74, column 2 to column 80)",
+  " (in 'string', line 76, column 4 to column 88)",
+  " (in 'string', line 75, column 18 to line 77, column 3)",
+  " (in 'string', line 75, column 2 to line 77, column 3)",
+  " (in 'string', line 79, column 4 to column 97)",
+  " (in 'string', line 78, column 22 to line 80, column 3)",
+  " (in 'string', line 78, column 2 to line 80, column 3)",
+  " (in 'string', line 61, column 2 to column 26)",
+  " (in 'string', line 62, column 2 to column 27)",
+  " (in 'string', line 64, column 2 to column 44)",
+  " (in 'string', line 66, column 2 to column 61)",
+  " (in 'string', line 13, column 2 to column 17)",
+  " (in 'string', line 14, column 2 to column 18)",
+  " (in 'string', line 15, column 9 to column 14)",
+  " (in 'string', line 15, column 16 to column 18)",
+  " (in 'string', line 15, column 2 to column 28)",
+  " (in 'string', line 16, column 9 to column 10)",
+  " (in 'string', line 16, column 12 to column 13)",
+  " (in 'string', line 16, column 2 to column 19)",
   " (in 'string', line 17, column 9 to column 10)",
-  " (in 'string', line 17, column 12 to column 13)",
-  " (in 'string', line 17, column 2 to column 53)",
-  " (in 'string', line 21, column 9 to column 11)",
-  " (in 'string', line 21, column 2 to column 49)",
-  " (in 'string', line 22, column 2 to column 28)",
-  " (in 'string', line 23, column 2 to column 26)",
-  " (in 'string', line 24, column 9 to column 11)",
-  " (in 'string', line 24, column 2 to column 49)",
-  " (in 'string', line 26, column 9 to column 11)",
-  " (in 'string', line 26, column 13 to column 14)",
-  " (in 'string', line 26, column 2 to column 40)",
-  " (in 'string', line 27, column 9 to column 11)",
-  " (in 'string', line 27, column 13 to column 14)",
-  " (in 'string', line 27, column 2 to column 26)",
-  " (in 'string', line 28, column 9 to column 15)",
-  " (in 'string', line 28, column 17 to column 18)",
-  " (in 'string', line 28, column 2 to column 32)",
-  " (in 'string', line 29, column 9 to column 10)",
-  " (in 'string', line 29, column 2 to column 19)",
-  " (in 'string', line 30, column 9 to column 10)",
-  " (in 'string', line 30, column 2 to column 17)",
-  " (in 'string', line 32, column 4 to column 33)",
-  " (in 'string', line 33, column 4 to column 31)",
-  " (in 'string', line 35, column 4 to column 56)",
-  " (in 'string', line 37, column 4 to column 60)",
-  " (in 'string', line 31, column 17 to line 38, column 3)",
-  " (in 'string', line 31, column 2 to line 38, column 3)",
-  " (in 'string', line 42, column 9 to column 10)",
-  " (in 'string', line 42, column 2 to column 58)",
-  " (in 'string', line 43, column 9 to column 10)",
-  " (in 'string', line 43, column 2 to column 28)",
-  " (in 'string', line 46, column 10 to column 11)",
-  " (in 'string', line 60, column 9 to column 11)",
-  " (in 'string', line 61, column 9 to column 15)"};
+  " (in 'string', line 17, column 2 to column 17)",
+  " (in 'string', line 18, column 2 to column 22)",
+  " (in 'string', line 19, column 9 to column 15)",
+  " (in 'string', line 19, column 17 to column 18)",
+  " (in 'string', line 19, column 2 to column 28)",
+  " (in 'string', line 20, column 9 to column 15)",
+  " (in 'string', line 20, column 2 to column 25)",
+  " (in 'string', line 22, column 2 to column 30)",
+  " (in 'string', line 25, column 2 to column 44)",
+  " (in 'string', line 28, column 9 to column 10)",
+  " (in 'string', line 28, column 12 to column 13)",
+  " (in 'string', line 28, column 2 to column 53)",
+  " (in 'string', line 32, column 9 to column 11)",
+  " (in 'string', line 32, column 2 to column 49)",
+  " (in 'string', line 33, column 2 to column 28)",
+  " (in 'string', line 34, column 2 to column 26)",
+  " (in 'string', line 35, column 9 to column 11)",
+  " (in 'string', line 35, column 2 to column 49)",
+  " (in 'string', line 37, column 9 to column 11)",
+  " (in 'string', line 37, column 13 to column 14)",
+  " (in 'string', line 37, column 2 to column 40)",
+  " (in 'string', line 38, column 9 to column 11)",
+  " (in 'string', line 38, column 13 to column 14)",
+  " (in 'string', line 38, column 2 to column 26)",
+  " (in 'string', line 39, column 9 to column 15)",
+  " (in 'string', line 39, column 17 to column 18)",
+  " (in 'string', line 39, column 2 to column 32)",
+  " (in 'string', line 40, column 9 to column 10)",
+  " (in 'string', line 40, column 2 to column 19)",
+  " (in 'string', line 41, column 9 to column 10)",
+  " (in 'string', line 41, column 2 to column 17)",
+  " (in 'string', line 43, column 4 to column 33)",
+  " (in 'string', line 44, column 4 to column 31)",
+  " (in 'string', line 45, column 4 to column 56)",
+  " (in 'string', line 46, column 4 to column 60)",
+  " (in 'string', line 42, column 17 to line 47, column 3)",
+  " (in 'string', line 42, column 2 to line 47, column 3)",
+  " (in 'string', line 51, column 9 to column 10)",
+  " (in 'string', line 51, column 2 to column 58)",
+  " (in 'string', line 52, column 9 to column 10)",
+  " (in 'string', line 52, column 2 to column 28)",
+  " (in 'string', line 55, column 10 to column 11)",
+  " (in 'string', line 69, column 9 to column 11)",
+  " (in 'string', line 70, column 9 to column 15)"};
 #include <stan_meta_header.hpp>
 class model_stan_2_NASC final : public model_base_crtp<model_stan_2_NASC> {
 private:
@@ -110,6 +111,7 @@ private:
   Eigen::Matrix<double,-1,-1> Y0_post_data__;
   Eigen::Matrix<double,-1,1> Y1_post_data__;
   double rho;
+  int use_bias_correction;
   Eigen::Matrix<double,-1,-1> I_J_data__;
   Eigen::Matrix<double,-1,1> y_pre_data__;
   double mean_y;
@@ -335,114 +337,126 @@ public:
       current_statement__ = 34;
       stan::math::check_less_or_equal(function__, "rho", rho, 1);
       current_statement__ = 35;
-      stan::math::validate_non_negative_index("I_J", "J", J);
+      context__.validate_dims("data initialization", "use_bias_correction",
+        "int", std::vector<size_t>{});
+      use_bias_correction = std::numeric_limits<int>::min();
+      current_statement__ = 35;
+      use_bias_correction = context__.vals_i("use_bias_correction")[(1 - 1)];
+      current_statement__ = 35;
+      stan::math::check_greater_or_equal(function__, "use_bias_correction",
+        use_bias_correction, 0);
+      current_statement__ = 35;
+      stan::math::check_less_or_equal(function__, "use_bias_correction",
+        use_bias_correction, 1);
       current_statement__ = 36;
       stan::math::validate_non_negative_index("I_J", "J", J);
       current_statement__ = 37;
+      stan::math::validate_non_negative_index("I_J", "J", J);
+      current_statement__ = 38;
       I_J_data__ = Eigen::Matrix<double,-1,-1>::Constant(J, J,
                      std::numeric_limits<double>::quiet_NaN());
       new (&I_J) Eigen::Map<Eigen::Matrix<double,-1,-1>>(I_J_data__.data(),
         J, J);
-      current_statement__ = 37;
+      current_statement__ = 38;
       stan::model::assign(I_J,
         stan::math::diag_matrix(stan::math::rep_vector(1.0, J)),
         "assigning variable I_J");
-      current_statement__ = 38;
-      stan::math::validate_non_negative_index("y_pre", "T0", T0);
       current_statement__ = 39;
+      stan::math::validate_non_negative_index("y_pre", "T0", T0);
+      current_statement__ = 40;
       y_pre_data__ = Eigen::Matrix<double,-1,1>::Constant(T0,
                        std::numeric_limits<double>::quiet_NaN());
       new (&y_pre)
         Eigen::Map<Eigen::Matrix<double,-1,1>>(y_pre_data__.data(), T0);
-      current_statement__ = 39;
+      current_statement__ = 40;
       stan::model::assign(y_pre,
         stan::math::to_vector(
           stan::model::rvalue(Y_panel, "Y_panel",
             stan::model::index_uni((J + 1)), stan::model::index_omni())),
         "assigning variable y_pre");
-      current_statement__ = 40;
+      current_statement__ = 41;
       mean_y = std::numeric_limits<double>::quiet_NaN();
-      current_statement__ = 40;
+      current_statement__ = 41;
       mean_y = stan::math::mean(y_pre);
-      current_statement__ = 41;
-      sd_y = std::numeric_limits<double>::quiet_NaN();
-      current_statement__ = 41;
-      sd_y = stan::math::sd(y_pre);
       current_statement__ = 42;
-      stan::math::validate_non_negative_index("y_pre_std", "T0", T0);
+      sd_y = std::numeric_limits<double>::quiet_NaN();
+      current_statement__ = 42;
+      sd_y = stan::math::sd(y_pre);
       current_statement__ = 43;
+      stan::math::validate_non_negative_index("y_pre_std", "T0", T0);
+      current_statement__ = 44;
       y_pre_std_data__ = Eigen::Matrix<double,-1,1>::Constant(T0,
                            std::numeric_limits<double>::quiet_NaN());
       new (&y_pre_std)
         Eigen::Map<Eigen::Matrix<double,-1,1>>(y_pre_std_data__.data(), T0);
-      current_statement__ = 43;
+      current_statement__ = 44;
       stan::model::assign(y_pre_std,
         stan::math::divide(stan::math::subtract(y_pre, mean_y), sd_y),
         "assigning variable y_pre_std");
-      current_statement__ = 44;
-      stan::math::validate_non_negative_index("X_pre", "T0", T0);
       current_statement__ = 45;
-      stan::math::validate_non_negative_index("X_pre", "J", J);
+      stan::math::validate_non_negative_index("X_pre", "T0", T0);
       current_statement__ = 46;
+      stan::math::validate_non_negative_index("X_pre", "J", J);
+      current_statement__ = 47;
       X_pre_data__ = Eigen::Matrix<double,-1,-1>::Constant(T0, J,
                        std::numeric_limits<double>::quiet_NaN());
       new (&X_pre)
         Eigen::Map<Eigen::Matrix<double,-1,-1>>(X_pre_data__.data(), T0, J);
-      current_statement__ = 46;
+      current_statement__ = 47;
       stan::model::assign(X_pre,
         stan::math::transpose(
           stan::model::rvalue(Y_panel, "Y_panel",
             stan::model::index_min_max(1, J), stan::model::index_omni())),
         "assigning variable X_pre");
-      current_statement__ = 47;
-      stan::math::validate_non_negative_index("X_pre_std", "T0", T0);
       current_statement__ = 48;
-      stan::math::validate_non_negative_index("X_pre_std", "J", J);
+      stan::math::validate_non_negative_index("X_pre_std", "T0", T0);
       current_statement__ = 49;
+      stan::math::validate_non_negative_index("X_pre_std", "J", J);
+      current_statement__ = 50;
       X_pre_std_data__ = Eigen::Matrix<double,-1,-1>::Constant(T0, J,
                            std::numeric_limits<double>::quiet_NaN());
       new (&X_pre_std)
         Eigen::Map<Eigen::Matrix<double,-1,-1>>(X_pre_std_data__.data(), T0,
         J);
-      current_statement__ = 50;
-      stan::math::validate_non_negative_index("Y0_post_std", "T_post", T_post);
       current_statement__ = 51;
-      stan::math::validate_non_negative_index("Y0_post_std", "J", J);
+      stan::math::validate_non_negative_index("Y0_post_std", "T_post", T_post);
       current_statement__ = 52;
+      stan::math::validate_non_negative_index("Y0_post_std", "J", J);
+      current_statement__ = 53;
       Y0_post_std_data__ = Eigen::Matrix<double,-1,-1>::Constant(T_post, J,
                              std::numeric_limits<double>::quiet_NaN());
       new (&Y0_post_std)
         Eigen::Map<Eigen::Matrix<double,-1,-1>>(Y0_post_std_data__.data(),
         T_post, J);
-      current_statement__ = 53;
-      stan::math::validate_non_negative_index("mean_x", "J", J);
       current_statement__ = 54;
+      stan::math::validate_non_negative_index("mean_x", "J", J);
+      current_statement__ = 55;
       mean_x_data__ = Eigen::Matrix<double,-1,1>::Constant(J,
                         std::numeric_limits<double>::quiet_NaN());
       new (&mean_x)
         Eigen::Map<Eigen::Matrix<double,-1,1>>(mean_x_data__.data(), J);
-      current_statement__ = 55;
-      stan::math::validate_non_negative_index("sd_x", "J", J);
       current_statement__ = 56;
+      stan::math::validate_non_negative_index("sd_x", "J", J);
+      current_statement__ = 57;
       sd_x_data__ = Eigen::Matrix<double,-1,1>::Constant(J,
                       std::numeric_limits<double>::quiet_NaN());
       new (&sd_x) Eigen::Map<Eigen::Matrix<double,-1,1>>(sd_x_data__.data(),
         J);
-      current_statement__ = 62;
+      current_statement__ = 63;
       for (int j = 1; j <= J; ++j) {
-        current_statement__ = 57;
+        current_statement__ = 58;
         stan::model::assign(mean_x,
           stan::math::mean(
             stan::model::rvalue(X_pre, "X_pre", stan::model::index_omni(),
               stan::model::index_uni(j))), "assigning variable mean_x",
           stan::model::index_uni(j));
-        current_statement__ = 58;
+        current_statement__ = 59;
         stan::model::assign(sd_x,
           stan::math::sd(
             stan::model::rvalue(X_pre, "X_pre", stan::model::index_omni(),
               stan::model::index_uni(j))), "assigning variable sd_x",
           stan::model::index_uni(j));
-        current_statement__ = 59;
+        current_statement__ = 60;
         stan::model::assign(X_pre_std,
           stan::math::divide(
             stan::math::subtract(
@@ -452,7 +466,7 @@ public:
             stan::model::rvalue(sd_x, "sd_x", stan::model::index_uni(j))),
           "assigning variable X_pre_std", stan::model::index_omni(),
           stan::model::index_uni(j));
-        current_statement__ = 60;
+        current_statement__ = 61;
         stan::model::assign(Y0_post_std,
           stan::math::divide(
             stan::math::subtract(
@@ -463,33 +477,33 @@ public:
           "assigning variable Y0_post_std", stan::model::index_omni(),
           stan::model::index_uni(j));
       }
-      current_statement__ = 63;
-      stan::math::validate_non_negative_index("s", "J", J);
       current_statement__ = 64;
+      stan::math::validate_non_negative_index("s", "J", J);
+      current_statement__ = 65;
       s_data__ = Eigen::Matrix<double,-1,1>::Constant(J,
                    std::numeric_limits<double>::quiet_NaN());
       new (&s) Eigen::Map<Eigen::Matrix<double,-1,1>>(s_data__.data(), J);
-      current_statement__ = 64;
+      current_statement__ = 65;
       stan::model::assign(s,
         stan::math::multiply(rho,
           stan::math::mdivide_left(
             stan::math::subtract(I_J, stan::math::multiply(rho, W_J)), w_J1)),
         "assigning variable s");
-      current_statement__ = 65;
-      stan::math::validate_non_negative_index("s_abs", "J", J);
       current_statement__ = 66;
+      stan::math::validate_non_negative_index("s_abs", "J", J);
+      current_statement__ = 67;
       s_abs_data__ = Eigen::Matrix<double,-1,1>::Constant(J,
                        std::numeric_limits<double>::quiet_NaN());
       new (&s_abs)
         Eigen::Map<Eigen::Matrix<double,-1,1>>(s_abs_data__.data(), J);
-      current_statement__ = 66;
+      current_statement__ = 67;
       stan::model::assign(s_abs, stan::math::fabs(s),
         "assigning variable s_abs");
-      current_statement__ = 67;
-      stan::math::validate_positive_index("w", "J", J);
       current_statement__ = 68;
-      stan::math::validate_non_negative_index("y_sim_pre", "T0", T0);
+      stan::math::validate_positive_index("w", "J", J);
       current_statement__ = 69;
+      stan::math::validate_non_negative_index("y_sim_pre", "T0", T0);
+      current_statement__ = 70;
       stan::math::validate_non_negative_index("y_counterfactual", "T_post",
         T_post);
     } catch (const std::exception& e) {
@@ -621,7 +635,8 @@ public:
       wts_dot = stan::math::dot_product(w, s);
       double bias_correction = std::numeric_limits<double>::quiet_NaN();
       current_statement__ = 7;
-      bias_correction = (1.0 / (1.0 - wts_dot));
+      bias_correction = (stan::math::logical_eq(use_bias_correction, 1) ? (1.0
+        / (1.0 - wts_dot)) : 1.0);
       current_statement__ = 10;
       for (int t = 1; t <= T0; ++t) {
         current_statement__ = 8;

@@ -1,5 +1,13 @@
-// Adjusted Step 2: Network-Aware Synthetic Control (NASC) Model
-// Rescaling logic and predictive stochasticity aligned with model1.stan
+// Step 2: Network-Aware Synthetic Control (NASC) Model
+// The NASC penalty is always active in this file. If the user does not want
+// the penalty, model1.stan is used instead (routed by Base.R on nasc_penalty).
+//
+// The bias-correction toggle remains: penalty-on, bias-off is a meaningful
+// configuration (NASC weights that account for network contamination via the
+// penalty, but with tau left on the untransformed scale).
+//
+// Generated-quantity names (y_sim_pre, y_counterfactual) match model1.stan so
+// a single R post-processing path handles both.
 
 data {
   // NASC Specific Data
@@ -14,8 +22,12 @@ data {
   matrix[T_post, J] Y0_post;     // Post-treatment donor outcomes (raw scale)
   vector[T_post] Y1_post;        // Post-treatment treated outcome (raw scale)
 
-  // rho is provided as data (one draw from Stage 1 per parallel run)
+  // rho is provided as data (one draw from Stage 1, or an exogenous value)
   real<lower=-1, upper=1> rho;
+
+  // Bias-correction toggle. Penalty toggle has been removed: this file is
+  // only used when the penalty is on.
+  int<lower=0, upper=1> use_bias_correction;
 }
 
 transformed data {
@@ -39,14 +51,12 @@ transformed data {
   for (j in 1:J) {
     mean_x[j] = mean(X_pre[, j]);
     sd_x[j]   = sd(X_pre[, j]);
-    // Standardize pre-treatment
     X_pre_std[, j] = (X_pre[, j] - mean_x[j]) / sd_x[j];
-    // Standardize post-treatment using pre-treatment moments (as in model1)
     Y0_post_std[, j] = (Y0_post[, j] - mean_x[j]) / sd_x[j];
   }
 
   // -------------------------------------------------------------
-  // CONTAMINATION VECTOR s (computed once from data)
+  // CONTAMINATION VECTOR s (always needed: penalty uses |s|)
   // -------------------------------------------------------------
   vector[J] s = rho * mdivide_left(I_J - rho * W_J, w_J1);
   vector[J] s_abs = fabs(s);
@@ -55,7 +65,7 @@ transformed data {
 parameters {
   simplex[J] w;                  // NASC donor weights
   real<lower=0> sigma_sc;        // Residual SD on standardized scale
-  real<lower=0> lambda;          // NASC penalty strength
+  real<lower=0> lambda;          // NASC penalty strength (always active here)
 }
 
 model {
@@ -63,7 +73,7 @@ model {
   sigma_sc ~ normal(0, 1);
   lambda   ~ gamma(2, 0.5);
 
-  // NASC Penalty
+  // NASC Penalty (always on in this file)
   target += -lambda * dot_product(w, s_abs);
 
   // Likelihood: standardized treated outcome ~ Normal(standardized donor mix, sigma_sc)
@@ -75,16 +85,14 @@ generated quantities {
   vector[T_post] y_counterfactual;  // Post-treatment counterfactual (raw scale)
 
   real wts_dot = dot_product(w, s);
-  real bias_correction = 1.0 / (1.0 - wts_dot);
+  // bias_correction is 1.0 when toggled off, so downstream code applies it
+  // unconditionally without changing tau.
+  real bias_correction = use_bias_correction == 1 ? 1.0 / (1.0 - wts_dot) : 1.0;
 
-  // ----------- Pre-treatment fitted values -----------
-  // Use normal_rng then rescale, following model1 style
   for (t in 1:T0) {
     y_sim_pre[t] = normal_rng(dot_product(X_pre_std[t, ], w), sigma_sc) * sd_y + mean_y;
   }
 
-  // ----------- Post-treatment counterfactual -----------
-  // Logic aligned with y_pred in model1.stan (includes stochastic noise)
   for (t in 1:T_post) {
     y_counterfactual[t] = normal_rng(dot_product(Y0_post_std[t, ], w), sigma_sc) * sd_y + mean_y;
   }

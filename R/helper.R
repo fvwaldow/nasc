@@ -1,5 +1,103 @@
 # Helper Functions
 
+# ----------------------------------------------------------------------------
+# Internal helper: run Step 2 across one or many rho draws.
+#
+# Used by both engines (stan_2_NASC sets rho_field = "rho", model1 sets
+# rho_field = "rho_bc"). When length(rhos) == 1, runs a single Stan fit with
+# default chains/iter. When > 1, runs the parallel furrr loop with reduced
+# chains (1) per worker.
+# ----------------------------------------------------------------------------
+.run_step2_loop <- function(rhos, base_data, step2_mod, rho_field, cores,
+                            extra_args, extract_pars) {
+
+  if (length(rhos) == 1L) {
+
+    worker_data <- base_data
+    worker_data[[rho_field]] <- rhos
+
+    fit_args <- c(
+      list(object = step2_mod, data = worker_data, cores = cores),
+      extra_args
+    )
+    fit <- do.call(rstan::sampling, fit_args)
+
+    draws <- rstan::extract(fit, pars = extract_pars)
+
+    # Replicate rho across draws for bookkeeping
+    n_draws <- length(draws[[extract_pars[length(extract_pars)]]])
+    if (is.matrix(draws[[1]])) n_draws <- nrow(draws[[1]])
+
+    out <- draws
+    out$rhos_used <- rep(rhos, n_draws)
+    out$last_fit  <- fit
+    return(out)
+
+  } else {
+
+    old_plan <- future::plan()
+    on.exit(future::plan(old_plan), add = TRUE)
+    future::plan(future::multisession, workers = cores)
+
+    run_worker <- function(single_rho, base_data, step2_mod, rho_field,
+                           extract_pars) {
+      suppressPackageStartupMessages(require(rstan, quietly = TRUE))
+      worker_data <- base_data
+      worker_data[[rho_field]] <- single_rho
+
+      fit_step2 <- rstan::sampling(
+        object        = step2_mod,
+        data          = worker_data,
+        chains        = 1,
+        iter          = 1000,
+        warmup        = 500,
+        refresh       = 0,
+        show_messages = FALSE
+      )
+
+      draws <- rstan::extract(fit_step2, pars = extract_pars)
+      draws$rho_used <- single_rho
+      draws
+    }
+
+    progressr::handlers(global = TRUE)
+    results_list <- progressr::with_progress({
+      p <- progressr::progressor(steps = length(rhos))
+      furrr::future_map(
+        rhos,
+        function(rho) {
+          res <- run_worker(
+            single_rho   = rho,
+            base_data    = base_data,
+            step2_mod    = step2_mod,
+            rho_field    = rho_field,
+            extract_pars = extract_pars
+          )
+          p()
+          res
+        },
+        .options = furrr::furrr_options(seed = TRUE, packages = "rstan")
+      )
+    })
+
+    # Aggregate. Matrix-valued params (multi-dim draws) are rbound; scalar
+    # vector params are concatenated.
+    out <- list()
+    for (par in extract_pars) {
+      first <- results_list[[1]][[par]]
+      if (is.null(dim(first)) || length(dim(first)) == 1L) {
+        out[[par]] <- do.call(c, lapply(results_list, \(x) x[[par]]))
+      } else {
+        out[[par]] <- do.call(rbind, lapply(results_list, \(x) x[[par]]))
+      }
+    }
+    out$rhos_used <- vapply(results_list, \(x) x$rho_used, numeric(1))
+    out$last_fit  <- NULL  # workers run in subprocesses; no last_fit retained
+    return(out)
+  }
+}
+
+
 # Creates a tile chart of treatment status over time and unit.
 # `time`, `id`, and `status` must be quosures.
 .time_tiles <- function(data, time, id, status) {
@@ -37,8 +135,10 @@
 
 
 
-# Post-processing for SAR/SDM models: extracts y_counterfactual draws,
-# calculates tau dynamically, and builds plot_data.
+# Unified post-processing: extracts y_counterfactual and y_sim_pre draws,
+# multiplies tau by bias_correction (which is 1.0 when bias correction is off),
+# and builds plot_data. Used for ALL model paths after the harmonization of
+# generated-quantity names across model1.stan and stan_2_NASC.stan.
 .get_nasc_results <- function(y_counterfactual_draws, bias_correction_draws, y_sim_pre_draws, pre_data, post_data, time, outcome, ci = 0.75) {
   # --- 1. POST-TREATMENT PERIOD ---
   post_times <- post_data |> dplyr::pull(!!time)
@@ -48,7 +148,9 @@
   # (Rows = draws, Columns = time periods)
   Y1_mat <- matrix(Y1_post, nrow = nrow(y_counterfactual_draws), ncol = length(Y1_post), byrow = TRUE)
 
-  # Calculate tau draws dynamically: tau_nasc = (Y1_post - y_counterfactual) * bias_correction
+  # Calculate tau draws dynamically: tau = (Y1_post - y_counterfactual) * bias_correction
+  # bias_correction is 1.0 when use_bias_correction = 0, so this is the naive
+  # difference in that case.
   # Note: Due to R's column-major matrix memory layout, multiplying an N x T matrix
   # by an N-length vector correctly multiplies each column element-wise by the vector.
   tau_draws <- (Y1_mat - y_counterfactual_draws) * bias_correction_draws
@@ -94,64 +196,6 @@
 
   # Combine pre and post data
   dplyr::bind_rows(pre_plot, post_plot)
-}
-
-
-
-
-.get_synth_draws <- function(fit, pre_data, post_data, time, outcome) {
-  y_sim_draws <- .get_par_long(fit = fit, par = y_sim)
-  dateXwalk <- pre_data |>
-    dplyr::mutate(idx = 1:dplyr::n()) |>
-    dplyr::select(idx, !!time)
-  y_hat <- dplyr::inner_join(y_sim_draws, dateXwalk, by = "idx") |>
-    dplyr::rename(y_synth = y_sim)
-
-  y_pred_draws <- .get_par_long(fit = fit, par = y_pred)
-
-  dateXwalk <- post_data |>
-    dplyr::mutate(idx = 1:dplyr::n()) |>
-    dplyr::select(idx, !!time)
-  y_pred_hat <- dplyr::inner_join(y_pred_draws, dateXwalk, by = "idx") |>
-    dplyr::rename(y_synth = y_pred)
-  y_synth <- dplyr::bind_rows(y_hat, y_pred_hat) |>
-    dplyr::select(-idx)
-
-  pre_outcome <- pre_data |>
-    dplyr::select(!!outcome, !!time)
-  post_outcome <- post_data |>
-    dplyr::select(!!outcome, !!time)
-
-  y <- dplyr::bind_rows(pre_outcome, post_outcome)
-  y_synth <- dplyr::full_join(y_synth, y, by = rlang::as_name(time))
-  return(y_synth)
-}
-
-
-
-
-.get_plot_df <- function(y_synth_draws, pre_data,
-                         post_data, time, outcome, ci = 0.75) {
-  y_synth <- y_synth_draws |>
-    dplyr::group_by(!!time) |>
-    dplyr::summarise(
-      LB = stats::quantile(y_synth, (1 - ci) / 2),
-      UB = stats::quantile(y_synth, 1 - (1 - ci) / 2),
-      y_synth = mean(y_synth)
-    )
-
-  all_data <- dplyr::bind_rows(pre_data, post_data)
-
-  df_plot_all <- dplyr::inner_join(y_synth, all_data,
-    by = rlang::as_name(time)
-  ) |>
-    dplyr::mutate(
-      tau = !!outcome - y_synth,
-      tau_LB = !!outcome - UB,
-      tau_UB = !!outcome - LB
-    ) |>
-    dplyr::select(!!time, !!outcome, y_synth, LB, UB, tau, tau_LB, tau_UB)
-  return(df_plot_all)
 }
 
 

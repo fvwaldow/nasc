@@ -5,8 +5,35 @@
 #'
 #' @description
 #' An R6 class implementing Bayesian Synthetic Control estimators with optional
-#' network/spatial awareness. Supports predictor matching, covariate adjustment,
-#' and SAR/SDM spatial models via Stan.
+#' network/spatial awareness.
+#'
+#' Three orthogonal options govern how the spatial structure enters the
+#' estimator:
+#'
+#' \itemize{
+#'   \item \code{spatial_model}: \code{"none"}, \code{"SAR"}, \code{"SDM"}, or
+#'         \code{"exogenous"}. The first three behave as before; the last skips
+#'         Step 1 and uses a user-supplied scalar \code{rho}.
+#'   \item \code{rho}: optional numeric in \code{(-1, 1)}. When provided,
+#'         Step 1 is skipped regardless of \code{spatial_model} and the supplied
+#'         value is used directly.
+#'   \item \code{bias_correction} (logical): whether the post-treatment effect
+#'         is rescaled by \eqn{1/(1 - w's)}.
+#'   \item \code{nasc_penalty} (logical): whether the NASC penalty
+#'         \eqn{-\lambda \langle w, |s| \rangle} enters the likelihood.
+#' }
+#'
+#' Model dispatch (single source of truth):
+#' \itemize{
+#'   \item \code{nasc_penalty = TRUE}  -> stan_2_NASC.stan (penalty always on
+#'         in this file, bias_correction toggleable).
+#'   \item \code{nasc_penalty = FALSE} -> model1.stan (no penalty; bias
+#'         correction toggleable through the same generated-quantities mechanism).
+#' }
+#'
+#' Step 1 (SAR or SDM rho estimation) runs only when (i) the chosen Step 2
+#' configuration uses a non-trivial rho (penalty on, or bias correction on)
+#' AND (ii) no exogenous rho was supplied.
 #'
 #' @export
 nascSynth <- R6::R6Class(
@@ -16,6 +43,9 @@ nascSynth <- R6::R6Class(
     covariates = NULL,
     W = NULL,
     spatial_model = NULL,
+    rho_exogenous = NULL,
+    bias_correction = NULL,
+    nasc_penalty = NULL,
     time = NULL,
     id = NULL,
     treated = NULL,
@@ -29,7 +59,13 @@ nascSynth <- R6::R6Class(
     y_synth_draws = NULL,
     lift_draws = NULL,
     treated_ids = NULL,
-    mcmc_checks = NULL
+    mcmc_checks = NULL,
+    # Internal flags:
+    #   uses_rho   - TRUE iff penalty or bias correction is active. Determines
+    #                whether s (and therefore rho/W/w_J1) is needed at all.
+    #   uses_step1 - TRUE iff Step 1 (SAR or SDM) must be fitted.
+    uses_rho   = NULL,
+    uses_step1 = NULL
   ),
   active = list(
     #' @field timeTiles ggplot2 tile chart of treatment status over time.
@@ -79,18 +115,80 @@ nascSynth <- R6::R6Class(
 
     #' @description
     #' Create a new nascSynth object.
+    #'
+    #' @param spatial_model One of \code{"none"}, \code{"SAR"}, \code{"SDM"},
+    #'   or \code{"exogenous"}.
+    #' @param rho Optional scalar in \code{(-1, 1)}. When supplied, Step 1 is
+    #'   skipped and this value is used in Step 2 regardless of
+    #'   \code{spatial_model}. Required when \code{spatial_model = "exogenous"}.
+    #' @param bias_correction Logical. If \code{TRUE}, the post-treatment
+    #'   counterfactual is rescaled by \eqn{1/(1 - w's)}. Default is \code{TRUE}
+    #'   for SAR/SDM/exogenous and \code{FALSE} for \code{spatial_model = "none"}.
+    #' @param nasc_penalty Logical. If \code{TRUE}, the NASC penalty
+    #'   \eqn{-\lambda \langle w, |s| \rangle} enters the likelihood. Same
+    #'   model-aware default as \code{bias_correction}.
     initialize = function(data, time, id, treated, outcome, ci_width = 0.75,
                           covariates = NULL,
-                          W = NULL, spatial_model = "none") {
+                          W = NULL, spatial_model = "none",
+                          rho = NULL,
+                          bias_correction = NULL,
+                          nasc_penalty = NULL) {
 
       stopifnot(ci_width > 0 & ci_width < 1)
 
-      if (!spatial_model %in% c("none", "SAR", "SDM")) {
-        stop("spatial_model must be 'none', 'SAR', or 'SDM'.")
+      if (!spatial_model %in% c("none", "SAR", "SDM", "exogenous")) {
+        stop("spatial_model must be 'none', 'SAR', 'SDM', or 'exogenous'.")
       }
-      if (spatial_model %in% c("SAR", "SDM") && is.null(W)) {
-        stop("A spatial weights matrix 'W' is required for SAR/SDM models.")
+
+      # Model-aware defaults preserve legacy behaviour for plain `none` calls.
+      if (is.null(bias_correction)) {
+        bias_correction <- spatial_model %in% c("SAR", "SDM", "exogenous")
       }
+      if (is.null(nasc_penalty)) {
+        nasc_penalty <- spatial_model %in% c("SAR", "SDM", "exogenous")
+      }
+
+      if (!is.logical(bias_correction) || length(bias_correction) != 1L) {
+        stop("'bias_correction' must be a single logical (TRUE/FALSE).")
+      }
+      if (!is.logical(nasc_penalty) || length(nasc_penalty) != 1L) {
+        stop("'nasc_penalty' must be a single logical (TRUE/FALSE).")
+      }
+
+      # Validate exogenous rho when supplied
+      if (!is.null(rho)) {
+        if (!is.numeric(rho) || length(rho) != 1L || is.na(rho)) {
+          stop("'rho' must be a single numeric value.")
+        }
+        if (rho <= -1 || rho >= 1) {
+          stop("'rho' must lie strictly inside (-1, 1).")
+        }
+      }
+
+      if (spatial_model == "exogenous" && is.null(rho)) {
+        stop("spatial_model = 'exogenous' requires a user-supplied 'rho'.")
+      }
+
+      # Does any spatial element of the estimator activate?
+      uses_rho <- bias_correction || nasc_penalty
+
+      # Need W whenever rho is in use. Don't need W otherwise.
+      if (uses_rho && is.null(W)) {
+        stop(
+          "A spatial weights matrix 'W' is required whenever ",
+          "bias_correction = TRUE or nasc_penalty = TRUE."
+        )
+      }
+
+      # When rho is in use under spatial_model = "none", the user must supply
+      # an exogenous rho (no Step 1 model to fit).
+      if (uses_rho && spatial_model == "none" && is.null(rho)) {
+        stop(
+          "spatial_model = 'none' with bias_correction = TRUE or ",
+          "nasc_penalty = TRUE requires an exogenous 'rho'."
+        )
+      }
+
       if (!is.null(W)) {
         W_mat <- as.matrix(W)
         rsums <- rowSums(W_mat, na.rm = TRUE)
@@ -100,29 +198,43 @@ nascSynth <- R6::R6Class(
         }
       }
 
-      private$time    <- rlang::enquo(time)
-      private$id      <- rlang::enquo(id)
-      private$treated <- rlang::enquo(treated)
-      private$outcome <- rlang::enquo(outcome)
-      private$ci_width     <- ci_width
-      private$covariates   <- covariates
-      private$W            <- W
-      private$spatial_model <- spatial_model
+      private$time            <- rlang::enquo(time)
+      private$id              <- rlang::enquo(id)
+      private$treated         <- rlang::enquo(treated)
+      private$outcome         <- rlang::enquo(outcome)
+      private$ci_width        <- ci_width
+      private$covariates      <- covariates
+      private$W               <- W
+      private$spatial_model   <- spatial_model
+      private$rho_exogenous   <- rho
+      private$bias_correction <- bias_correction
+      private$nasc_penalty    <- nasc_penalty
+      private$uses_rho        <- uses_rho
 
+      # Step 1 runs only if rho is needed AND the user did not supply one.
+      private$uses_step1 <- uses_rho &&
+        spatial_model %in% c("SAR", "SDM") &&
+        is.null(rho)
+
+      # ---- Status message ----
+      engine <- if (nasc_penalty) "stan_2_NASC" else "model1"
+      rho_src <- if (!uses_rho) {
+        "n/a (no rho in use)"
+      } else if (!is.null(rho)) {
+        sprintf("exogenous (rho = %.4f)", rho)
+      } else {
+        sprintf("Step 1 %s posterior", spatial_model)
+      }
       message(sprintf(
-        "Transforming data for %s model",
-        ifelse(
-          spatial_model == "none",
-          "standard SC predictor-match",
-          paste("NASC", spatial_model)
-        )
+        "nascSynth: engine = %s | nasc_penalty = %s | bias_correction = %s | rho source = %s",
+        engine, nasc_penalty, bias_correction, rho_src
       ))
 
       if (!setequal(
         data |>
-        dplyr::select(!!private$treated) |>
-        dplyr::distinct() |>
-        dplyr::pull({{ treated }}),
+          dplyr::select(!!private$treated) |>
+          dplyr::distinct() |>
+          dplyr::pull({{ treated }}),
         c(1, 0)
       )) {
         stop("Treated identifier is not binary (1/0).")
@@ -168,25 +280,26 @@ nascSynth <- R6::R6Class(
         status = rlang::quo(status)
       )
 
-      # Build model lists for the two-step pipeline
-      if (spatial_model == "SAR") {
-        private$stan_model <- list(
-          step1 = stanmodels$stan_1_SAR_NASC,
-          step2 = stanmodels$stan_2_NASC
-        )
-      } else if (spatial_model == "SDM") {
-        private$stan_model <- list(
-          step1 = stanmodels$stan_1_SDM_NASC,
-          step2 = stanmodels$stan_2_NASC
-        )
-      } else {
-        private$stan_model <- stanmodels$model1
-      }
+      # Stan model dispatch
+      private$stan_model <- list(
+        step1 = if (private$uses_step1) {
+          switch(
+            spatial_model,
+            SAR = stanmodels$stan_1_SAR_NASC,
+            SDM = stanmodels$stan_1_SDM_NASC
+          )
+        } else {
+          NULL
+        },
+        step2 = if (nasc_penalty) stanmodels$stan_2_NASC else stanmodels$model1
+      )
     },
 
     #' @description
     #' Fit the Stan model via MCMC.
-    #' @param n_samples Number of spatial draws to pass to NASC (default 100).
+    #' @param n_samples Number of rho draws to propagate to Step 2 when Step 1
+    #'   runs (default 100). Ignored when an exogenous rho was supplied or when
+    #'   no rho is in use.
     #' @param cores Number of CPU cores for parallel execution.
     #' @param ... Additional arguments forwarded to [rstan::sampling()].
     fit = function(n_samples = 100, cores = parallel::detectCores() - 1, ...) {
@@ -205,7 +318,12 @@ nascSynth <- R6::R6Class(
       X1     <- pre_data  |> dplyr::pull(!!private$outcome)
       X_pred <- post_data |> dplyr::select(-!!private$time, -!!private$treated, -!!private$outcome)
 
-      if (!is.null(private$covariates)) {
+      # Covariate-as-extra-rows feature (Abadie-style predictor matching).
+      # Only applied for the model1 engine, since stan_2_NASC's Y_panel has
+      # spatial-aligned dimensions that cannot be extended with covariate rows.
+      use_covariate_rows <- !private$nasc_penalty && !is.null(private$covariates)
+
+      if (use_covariate_rows) {
         cov_names <- setdiff(
           names(private$covariates),
           c(rlang::as_name(private$time), rlang::as_name(private$id))
@@ -235,269 +353,293 @@ nascSynth <- R6::R6Class(
         X1 <- c(X1, unlist(cov_wide[, treated_col, drop = TRUE]))
       }
 
-      if (private$spatial_model %in% c("SAR", "SDM")) {
+      donor_ids  <- colnames(X_pred)  # post-treatment donor list (pre-cov stack-safe)
+      treated_id <- as.character(private$treated_ids)
 
-        # ---- Build covariate matrices from private$covariates ONLY ----
-        # X0: K_pred x J (donor predictors), X1: K_pred-vector (treated predictors)
-        cov_names <- setdiff(
-          names(private$covariates),
-          c(rlang::as_name(private$time), rlang::as_name(private$id))
-        )
-        if (length(cov_names) == 0L) {
-          stop("'covariates' contains no predictor columns (only time/id found).")
-        }
+      # ----------------------------------------------------------------------
+      # Build spatial inputs (W block, lambda_W, optional Step-1 covariates)
+      # only if we actually need them.
+      # ----------------------------------------------------------------------
+      W_J      <- NULL
+      w_J1     <- NULL
+      W_full   <- NULL
+      lambda_W <- NULL
+      Y_panel  <- NULL
+      X0_mat   <- NULL
+      X1_vec   <- NULL
+      K_pred   <- 0L
 
-        cov_wide <- private$covariates |>
-          dplyr::filter(!!private$time < private$intervention) |>
-          dplyr::group_by(!!private$id) |>
-          dplyr::summarise(
-            dplyr::across(dplyr::all_of(cov_names), mean),
-            .groups = "drop"
-          ) |>
-          tidyr::pivot_longer(
-            cols      = dplyr::all_of(cov_names),
-            names_to  = ".covariate",
-            values_to = ".value"
-          ) |>
-          tidyr::pivot_wider(
-            names_from  = !!private$id,
-            values_from = .value
-          )
-
-        pred_names <- cov_wide$.covariate
-        cov_wide   <- cov_wide |> dplyr::select(-.covariate)
-
-        donor_ids   <- colnames(X)                      # X is the wide outcome panel
-        treated_id  <- as.character(private$treated_ids)
-
-        # Predictor matrices: rows = predictors, cols = units
-        X0_mat <- as.matrix(cov_wide[, donor_ids,  drop = FALSE])
-        X1_vec <- as.numeric(cov_wide[[treated_id]])
-        K_pred <- length(pred_names)
-
-        if (length(X1_vec) != K_pred) {
-          stop("Treated unit predictor vector length does not match K_pred.")
-        }
-        if (anyNA(X0_mat) || anyNA(X1_vec)) {
-          stop("Missing values found in predictor matrix; please impute or drop.")
-        }
-
-        # ---- Spatial weights matrix ----
+      if (private$uses_rho) {
         if (is.null(rownames(private$W)) || is.null(colnames(private$W))) {
           all_ids <- levels(private$data[[rlang::as_name(private$id)]])
           rownames(private$W) <- colnames(private$W) <- all_ids
         }
-        W_ordered <- private$W[c(donor_ids, treated_id), c(donor_ids, treated_id)]
+        W_full <- private$W[c(donor_ids, treated_id), c(donor_ids, treated_id)]
         J <- length(donor_ids)
+        W_J  <- W_full[1:J, 1:J]
+        w_J1 <- as.vector(W_full[1:J, J + 1])
 
-        # ---- W eigenvalue check ----
-        ev <- eigen(W_ordered, only.values = TRUE)$values
-        if (max(abs(Im(ev))) > 1e-8) {
-          warning("W has non-trivial complex eigenvalues; SAR/SDM identification ",
-                  "may be unreliable.")
-        }
-        lambda_W <- Re(ev)
+        if (private$uses_step1) {
+          ev <- eigen(W_full, only.values = TRUE)$values
+          if (max(abs(Im(ev))) > 1e-8) {
+            warning("W has non-trivial complex eigenvalues; SAR/SDM ",
+                    "identification may be unreliable.")
+          }
+          lambda_W <- Re(ev)
 
-        # ---- Stan data ----
-        stan_data <- list(
-          K_pred   = K_pred,
-          X1       = X1_vec,
-          J        = J,
-          X0       = X0_mat,
-          T0       = nrow(pre_data),
-          Y_panel  = t(as.matrix(
-            pre_data |> dplyr::select(dplyr::all_of(donor_ids), !!private$outcome)
-          )),
-          W        = W_ordered,
-          lambda_W = lambda_W,
-          W_J      = W_ordered[1:J, 1:J],
-          w_J1     = as.vector(W_ordered[1:J, J + 1]),
-          T_post   = nrow(post_data),
-          Y0_post  = as.matrix(X_pred[, donor_ids, drop = FALSE]),
-          Y1_post  = post_data |> dplyr::pull(!!private$outcome)
-        )
-
-        # ---------------------------------------------------------------------
-        # TWO-STEP PARALLEL EXECUTION
-        # ---------------------------------------------------------------------
-        message(sprintf("Running Step 1: Estimating %s parameters...",
-                        private$spatial_model))
-        private$fitted <- rstan::sampling(
-          private$stan_model$step1,
-          data  = stan_data,
-          cores = cores,
-          ...
-        )
-
-        # --- STRATIFIED SAMPLING ACROSS CHAINS ---
-        # permuted = FALSE returns an array of [iterations, chains, parameters]
-        rho_array <- rstan::extract(private$fitted, pars = "rho", permuted = FALSE)
-
-        # Get dimensions
-        n_iters  <- dim(rho_array)[1]
-        n_chains <- dim(rho_array)[2]
-
-        # Calculate exactly how many samples to draw per chain
-        samples_per_chain <- ceiling(n_samples / n_chains)
-        sampled_rhos <- numeric(0)
-
-        # Draw evenly across all chains
-        for (c_idx in seq_len(n_chains)) {
-          # Extract the rho vector for this specific chain
-          chain_draws <- rho_array[, c_idx, 1]
-
-          # Sample without replacement
-          take_n <- min(samples_per_chain, n_iters)
-          sampled_rhos <- c(sampled_rhos, sample(chain_draws, size = take_n, replace = FALSE))
-        }
-
-        # If ceiling() caused slight over-sampling (e.g., 100/3 = 34 * 3 = 102),
-        # trim randomly to exactly n_samples
-        if (length(sampled_rhos) > n_samples) {
-          sampled_rhos <- sample(sampled_rhos, size = n_samples, replace = FALSE)
-        }
-        # -----------------------------------------
-
-        message(sprintf("Running Step 2: Parallel NASC across %d cores using furrr...", cores))
-
-        # Save old plan and ensure it gets restored on exit
-        old_plan <- future::plan()
-        on.exit(future::plan(old_plan), add = TRUE)
-
-        # Set up future plan
-        future::plan(future::multisession, workers = cores)
-
-        # Worker: now extracts ALL relevant quantities (w, lambda, bias_correction)
-        run_nasc_worker <- function(single_rho, base_data, step2_mod) {
-          # Silently load rstan on the worker
-          suppressPackageStartupMessages(require(rstan, quietly = TRUE))
-
-          worker_data        <- base_data
-          worker_data$rho    <- single_rho
-
-          # Silently run the MCMC sampling
-          fit_step2 <- rstan::sampling(
-              object        = step2_mod,
-              data          = worker_data,
-              chains        = 1,
-              iter          = 1000,
-              warmup        = 500,
-              refresh       = 0,
-              show_messages = FALSE
+          # Build covariate matrices for Step 1
+          if (is.null(private$covariates)) {
+            stop("SAR/SDM Step 1 requires 'covariates'. Either supply ",
+                 "covariates or pass an exogenous 'rho'.")
+          }
+          cov_names <- setdiff(
+            names(private$covariates),
+            c(rlang::as_name(private$time), rlang::as_name(private$id))
+          )
+          if (length(cov_names) == 0L) {
+            stop("'covariates' contains no predictor columns (only time/id found).")
+          }
+          cov_wide <- private$covariates |>
+            dplyr::filter(!!private$time < private$intervention) |>
+            dplyr::group_by(!!private$id) |>
+            dplyr::summarise(
+              dplyr::across(dplyr::all_of(cov_names), mean),
+              .groups = "drop"
+            ) |>
+            tidyr::pivot_longer(
+              cols      = dplyr::all_of(cov_names),
+              names_to  = ".covariate",
+              values_to = ".value"
+            ) |>
+            tidyr::pivot_wider(
+              names_from  = !!private$id,
+              values_from = .value
             )
+          pred_names <- cov_wide$.covariate
+          cov_wide   <- cov_wide |> dplyr::select(-.covariate)
 
+          X0_mat <- as.matrix(cov_wide[, donor_ids,  drop = FALSE])
+          X1_vec <- as.numeric(cov_wide[[treated_id]])
+          K_pred <- length(pred_names)
 
-          draws <- rstan::extract(
-            fit_step2,
-            pars = c("y_counterfactual", "y_sim_pre", "w", "lambda",
-                     "sigma_sc", "bias_correction")
-          )
+          if (length(X1_vec) != K_pred) {
+            stop("Treated unit predictor vector length does not match K_pred.")
+          }
+          if (anyNA(X0_mat) || anyNA(X1_vec)) {
+            stop("Missing values found in predictor matrix; please impute or drop.")
+          }
 
-          list(
-            y_counterfactual = draws$y_counterfactual,
-            y_sim_pre        = draws$y_sim_pre,
-            w                = draws$w,
-            lambda           = draws$lambda,
-            sigma_sc         = draws$sigma_sc,
-            bias_correction  = draws$bias_correction,
-            rho_used         = single_rho
-          )
+          # Y_panel for Step 1 (pre-cov stacking) and stan_2_NASC
+          Y_panel <- t(as.matrix(
+            pre_data |> dplyr::select(dplyr::all_of(donor_ids), !!private$outcome)
+          ))
+        } else if (private$nasc_penalty) {
+          # Need Y_panel for stan_2_NASC even without Step 1
+          Y_panel <- t(as.matrix(
+            pre_data |> dplyr::select(dplyr::all_of(donor_ids), !!private$outcome)
+          ))
         }
+      }
 
-        # Activate global handlers so the progress bar shows in the console
-        progressr::handlers(global = TRUE)
+      # ----------------------------------------------------------------------
+      # STEP 1 (only if needed)
+      # ----------------------------------------------------------------------
+      sampled_rhos <- if (private$uses_rho) {
+        if (!is.null(private$rho_exogenous)) {
+          private$rho_exogenous   # single scalar
+        } else if (private$uses_step1) {
 
-        # Wrap the future_map call in with_progress
-        results_list <- progressr::with_progress({
-          # Initialize the progressor with the total number of steps
-          p <- progressr::progressor(steps = length(sampled_rhos))
-
-          furrr::future_map(
-            sampled_rhos,
-            function(rho) {
-              # 1. Run the worker
-              res <- run_nasc_worker(
-                single_rho = rho,
-                base_data  = stan_data,
-                step2_mod  = private$stan_model$step2
-              )
-              # 2. Signal the progress bar that this step is done
-              p()
-              # 3. Return the result
-              return(res)
-            },
-            .options = furrr::furrr_options(seed = TRUE, packages = "rstan")
+          step1_data <- list(
+            K_pred   = K_pred,
+            X1       = X1_vec,
+            J        = length(donor_ids),
+            X0       = X0_mat,
+            T0       = nrow(pre_data),
+            Y_panel  = Y_panel,
+            W        = W_full,
+            lambda_W = lambda_W
           )
-        })
 
-        # Aggregate
-        final_y_cf            <- do.call(rbind, lapply(results_list, \(x) x$y_counterfactual))
-        final_y_sim_pre       <- do.call(rbind, lapply(results_list, \(x) x$y_sim_pre))
-        final_w               <- do.call(rbind, lapply(results_list, \(x) x$w))
-        final_lambda          <- do.call(c,     lapply(results_list, \(x) x$lambda))
-        final_sigma_sc        <- do.call(c,     lapply(results_list, \(x) x$sigma_sc))
-        final_bias_correction <- do.call(c,     lapply(results_list, \(x) x$bias_correction))
-        rhos_used             <- vapply(results_list, \(x) x$rho_used, numeric(1))
+          message(sprintf("Running Step 1: Estimating %s parameters...",
+                          private$spatial_model))
+          private$fitted <- rstan::sampling(
+            private$stan_model$step1,
+            data  = step1_data,
+            cores = cores,
+            ...
+          )
+
+          # Stratified sampling across chains
+          rho_array <- rstan::extract(private$fitted, pars = "rho", permuted = FALSE)
+          n_iters  <- dim(rho_array)[1]
+          n_chains <- dim(rho_array)[2]
+
+          samples_per_chain <- ceiling(n_samples / n_chains)
+          rho_draws <- numeric(0)
+          for (c_idx in seq_len(n_chains)) {
+            chain_draws <- rho_array[, c_idx, 1]
+            take_n <- min(samples_per_chain, n_iters)
+            rho_draws <- c(rho_draws,
+                           sample(chain_draws, size = take_n, replace = FALSE))
+          }
+          if (length(rho_draws) > n_samples) {
+            rho_draws <- sample(rho_draws, size = n_samples, replace = FALSE)
+          }
+          rho_draws
+        } else {
+          stop("Internal: uses_rho but no exogenous rho and no Step 1.")
+        }
+      } else {
+        NA_real_   # marker: no rho needed
+      }
+
+      # ----------------------------------------------------------------------
+      # STEP 2 - dispatch to model1 or stan_2_NASC depending on nasc_penalty
+      # ----------------------------------------------------------------------
+      if (private$nasc_penalty) {
+
+        # ---- stan_2_NASC engine ----
+        # Always loops over rho draws (parallel when >1, single when scalar).
+        base_data <- list(
+          J                   = length(donor_ids),
+          T0                  = nrow(pre_data),
+          Y_panel             = Y_panel,
+          W_J                 = W_J,
+          w_J1                = w_J1,
+          T_post              = nrow(post_data),
+          Y0_post             = as.matrix(X_pred[, donor_ids, drop = FALSE]),
+          Y1_post             = post_data |> dplyr::pull(!!private$outcome),
+          use_bias_correction = as.integer(private$bias_correction)
+        )
+
+        results <- .run_step2_loop(
+          rhos       = sampled_rhos,
+          base_data  = base_data,
+          step2_mod  = private$stan_model$step2,
+          rho_field  = "rho",
+          cores      = cores,
+          extra_args = list(...),
+          extract_pars = c("y_counterfactual", "y_sim_pre", "w", "lambda",
+                           "sigma_sc", "bias_correction")
+        )
+
+        # When no Step 1 ran, expose Step 2 as the user-facing fit.
+        if (is.null(private$fitted)) private$fitted <- results$last_fit
 
         private$y_synth_draws <- list(
-          y_counterfactual= final_y_cf, # <--- Changed key and value
-          y_sim_pre       = final_y_sim_pre,
-          w               = final_w,
-          lambda          = final_lambda,
-          sigma_sc        = final_sigma_sc,
-          bias_correction = final_bias_correction,
-          rhos_used       = rhos_used
-        )
-
-        private$plot_data <- .get_nasc_results(
-          y_counterfactual_draws = final_y_cf,            # <--- Update parameter names
-          bias_correction_draws  = final_bias_correction, # <--- Add bias draw parameter
-          y_sim_pre_draws        = final_y_sim_pre,
-          pre_data               = pre_data,
-          post_data              = post_data,
-          time                   = private$time,
-          outcome                = private$outcome,
-          ci                     = private$ci_width
+          y_counterfactual = results$y_counterfactual,
+          y_sim_pre        = results$y_sim_pre,
+          w                = results$w,
+          lambda           = results$lambda,
+          sigma_sc         = results$sigma_sc,
+          bias_correction  = results$bias_correction,
+          rhos_used        = results$rhos_used
         )
 
       } else {
-        # Standard Model (non-spatial) FIX
-        # Map the R variables to the exact names expected by model1.stan
-        stan_data <- list(
-          N       = nrow(X),       # pre-intervention periods (+ covariates)
-          y       = X1,            # pre-intervention outcome for treated
-          K       = ncol(X),       # number of donors
-          X       = as.matrix(X),  # pre-intervention outcome for donors
-          N_pred  = nrow(X_pred),  # post-intervention periods
-          X_pred  = as.matrix(X_pred) # post-intervention outcome for donors
+
+        # ---- model1 engine (with optional bias correction) ----
+        # Build the bias-correction inputs only if active. When inactive,
+        # J_bc = 0 and the spatial inputs are zero-sized placeholders Stan
+        # tolerates without computing anything.
+        if (private$bias_correction) {
+          # In model1, the simplex `w` has length K = ncol(X). We need W_J
+          # to also be K x K aligned to the donor columns of X. The donors
+          # in X_pred (donor_ids) match the donor columns of X by construction
+          # (they are derived from the same wide_df).
+          J_bc   <- ncol(X)
+          W_J_bc <- W_J
+          w_J1_bc <- w_J1
+          rho_bc <- if (length(sampled_rhos) == 1L) sampled_rhos else NA_real_
+          # When sampled_rhos is a vector (Step 1 path), each Step 2 worker
+          # plugs in its own rho. The .run_step2_loop helper handles that via
+          # the `rho_field` argument.
+        } else {
+          J_bc    <- 0L
+          W_J_bc  <- matrix(0, 0, 0)
+          w_J1_bc <- numeric(0)
+          rho_bc  <- 0  # arbitrary value within (-1, 1); unused when J_bc = 0
+        }
+
+        base_data <- list(
+          N                   = nrow(X),
+          y                   = X1,
+          K                   = ncol(X),
+          X                   = as.matrix(X),
+          N_pred              = nrow(X_pred),
+          X_pred              = as.matrix(X_pred),
+          use_bias_correction = as.integer(private$bias_correction),
+          J_bc                = J_bc,
+          W_J                 = W_J_bc,
+          w_J1                = w_J1_bc,
+          rho_bc              = if (private$bias_correction) rho_bc else 0
         )
 
-        private$fitted <- rstan::sampling(
-          private$stan_model,
-          data = stan_data,
-          cores = cores,
-          ...
-        )
+        if (!private$bias_correction) {
 
-        # FIX: Use .get_synth_draws instead of .get_synth_draws_predictor_match
-        # because model1.stan outputs `y_sim` and `y_pred`
-        private$y_synth_draws <- .get_synth_draws(
-          fit       = private$fitted,
-          pre_data  = pre_data,
-          post_data = post_data,
-          time      = private$time,
-          outcome   = private$outcome
-        )
+          # No spatial element at all -> single Stan fit, no rho loop.
+          private$fitted <- rstan::sampling(
+            private$stan_model$step2,
+            data  = base_data,
+            cores = cores,
+            ...
+          )
 
-        private$plot_data <- .get_plot_df(
-          y_synth_draws = private$y_synth_draws,
-          pre_data      = pre_data,
-          post_data     = post_data,
-          ci            = private$ci_width,
-          time          = private$time,
-          outcome       = private$outcome
-        )
+          draws <- rstan::extract(
+            private$fitted,
+            pars = c("y_counterfactual", "y_sim_pre", "w", "sigma",
+                     "bias_correction")
+          )
+          private$y_synth_draws <- list(
+            y_counterfactual = draws$y_counterfactual,
+            y_sim_pre        = draws$y_sim_pre,
+            w                = draws$w,
+            sigma            = draws$sigma,
+            bias_correction  = draws$bias_correction,  # all 1.0 in this branch
+            rhos_used        = NA_real_
+          )
+
+        } else {
+
+          # Bias correction on -> loop model1 across rho draws (same
+          # propagation pattern as the stan_2_NASC path).
+          results <- .run_step2_loop(
+            rhos       = sampled_rhos,
+            base_data  = base_data,
+            step2_mod  = private$stan_model$step2,
+            rho_field  = "rho_bc",
+            cores      = cores,
+            extra_args = list(...),
+            extract_pars = c("y_counterfactual", "y_sim_pre", "w", "sigma",
+                             "bias_correction")
+          )
+
+          if (is.null(private$fitted)) private$fitted <- results$last_fit
+
+          private$y_synth_draws <- list(
+            y_counterfactual = results$y_counterfactual,
+            y_sim_pre        = results$y_sim_pre,
+            w                = results$w,
+            sigma            = results$sigma,
+            bias_correction  = results$bias_correction,
+            rhos_used        = results$rhos_used
+          )
+        }
       }
+
+      # ----------------------------------------------------------------------
+      # Unified post-processing (single helper, both engines feed in)
+      # ----------------------------------------------------------------------
+      private$plot_data <- .get_nasc_results(
+        y_counterfactual_draws = private$y_synth_draws$y_counterfactual,
+        bias_correction_draws  = private$y_synth_draws$bias_correction,
+        y_sim_pre_draws        = private$y_synth_draws$y_sim_pre,
+        pre_data               = pre_data,
+        post_data              = post_data,
+        time                   = private$time,
+        outcome                = private$outcome,
+        ci                     = private$ci_width
+      )
     },
 
     #' @description
@@ -515,28 +657,16 @@ nascSynth <- R6::R6Class(
       pre_data  <- wide_df |> dplyr::filter(!!private$time <  private$intervention)
       post_data <- wide_df |> dplyr::filter(!!private$time >= private$intervention)
 
-      # Branch depending on whether y_synth_draws is a list (spatial) or df (standard)
-      if (private$spatial_model %in% c("SAR", "SDM")) {
-        private$plot_data <- .get_nasc_results(
-          y_counterfactual_draws = private$y_synth_draws$y_counterfactual,
-          bias_correction_draws  = private$y_synth_draws$bias_correction,
-          y_sim_pre_draws        = private$y_synth_draws$y_sim_pre,
-          pre_data               = pre_data,
-          post_data              = post_data,
-          time                   = private$time,
-          outcome                = private$outcome,
-          ci                     = private$ci_width
-        )
-      } else {
-        private$plot_data <- .get_plot_df(
-          y_synth_draws = private$y_synth_draws,
-          pre_data      = pre_data,
-          post_data     = post_data,
-          ci            = private$ci_width,
-          time          = private$time,
-          outcome       = private$outcome
-        )
-      }
+      private$plot_data <- .get_nasc_results(
+        y_counterfactual_draws = private$y_synth_draws$y_counterfactual,
+        bias_correction_draws  = private$y_synth_draws$bias_correction,
+        y_sim_pre_draws        = private$y_synth_draws$y_sim_pre,
+        pre_data               = pre_data,
+        post_data              = post_data,
+        time                   = private$time,
+        outcome                = private$outcome,
+        ci                     = private$ci_width
+      )
     },
 
     #' @description
@@ -571,18 +701,11 @@ nascSynth <- R6::R6Class(
 
     #' @description
     #' Plot implicit weight distribution across draws.
-    #' @return ggplot object with weight distribution per unit.
     weightDraws = function() {
       if (is.null(private$fitted)) stop("Run fit() first.")
 
-      # Extract weights depending on the model type
-      if (private$spatial_model %in% c("SAR", "SDM")) {
-        w_mat <- private$y_synth_draws$w
-      } else {
-        w_mat <- rstan::extract(private$fitted, pars = "w")$w
-      }
+      w_mat <- private$y_synth_draws$w
 
-      # Get donor names (all unique IDs minus the treated ID)
       treated_id <- as.character(private$treated_ids)
       all_ids <- levels(private$data[[rlang::as_name(private$id)]])
       donor_names <- setdiff(all_ids, treated_id)
@@ -593,7 +716,6 @@ nascSynth <- R6::R6Class(
 
       colnames(w_mat) <- donor_names
 
-      # Reshape using modern tidyr::pivot_longer
       melt_w <- as.data.frame(w_mat) |>
         tidyr::pivot_longer(
           cols      = dplyr::everything(),
@@ -601,7 +723,6 @@ nascSynth <- R6::R6Class(
           values_to = "weight"
         )
 
-      # Generate Ridge Plot
       melt_w |>
         ggplot2::ggplot(ggplot2::aes(x = weight, y = ID, fill = ID)) +
         ggridges::geom_density_ridges(alpha = 0.7) +
@@ -611,30 +732,21 @@ nascSynth <- R6::R6Class(
     },
 
     #' @description
-    #' Plots correlations between weights across draws.
-    #' @return ggplot heatmap object with correlations.
+    #' Plot correlations between weights across draws.
     weightCorr = function() {
       if (is.null(private$fitted)) stop("Run fit() first.")
 
-      # Extract weights depending on the model type
-      if (private$spatial_model %in% c("SAR", "SDM")) {
-        w_mat <- private$y_synth_draws$w
-      } else {
-        w_mat <- rstan::extract(private$fitted, pars = "w")$w
-      }
+      w_mat <- private$y_synth_draws$w
 
-      # Get donor names
       treated_id <- as.character(private$treated_ids)
       all_ids <- levels(private$data[[rlang::as_name(private$id)]])
       donor_names <- setdiff(all_ids, treated_id)
 
       colnames(w_mat) <- donor_names
 
-      # Compute correlation matrix
       cormat <- round(cor(w_mat), 3)
-      diag(cormat) <- NA # Set diagonal to NA so it doesn't skew the color scale
+      diag(cormat) <- NA
 
-      # Reshape without depending on reshape2::melt
       melted_cormat <- as.data.frame(cormat) |>
         dplyr::mutate(X1 = factor(rownames(cormat), levels = donor_names)) |>
         tidyr::pivot_longer(
@@ -644,7 +756,6 @@ nascSynth <- R6::R6Class(
         ) |>
         dplyr::mutate(X2 = factor(X2, levels = donor_names))
 
-      # Generate Heatmap
       ggplot2::ggplot(data = melted_cormat, ggplot2::aes(x = X1, y = X2, fill = value)) +
         ggplot2::geom_tile(color = "white") +
         ggplot2::scale_fill_gradient2(
@@ -667,3 +778,4 @@ nascSynth <- R6::R6Class(
     }
   )
 )
+
