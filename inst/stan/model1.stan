@@ -45,13 +45,13 @@ transformed data{ // normalize using pre-treatment values
 
 parameters {
    real<lower=0> sigma;
-   simplex[K] beta;
+   simplex[K] w;
 }
 
 model {
    // Priors.
    sigma ~ normal(0,1);
-     target += normal_lpdf(y_std | X_std*beta,
+     target += normal_lpdf(y_std | X_std*w,
                            sigma);
 }
 
@@ -59,9 +59,9 @@ generated quantities {
    vector[N] y_sim;
    vector[N_pred] y_pred;
    for (i in 1:N) {
-      y_sim[i] = normal_rng(X_std[i,]*beta, sigma) * sd_y + mean_y; //
+      y_sim[i] = normal_rng(X_std[i,]*w, sigma) * sd_y + mean_y; //
    }
    for (j in 1:N_pred) {
-      y_pred[j] = normal_rng(X_pred_std[j,]*beta, sigma) * sd_y + mean_y; //
+      y_pred[j] = normal_rng(X_pred_std[j,]*w, sigma) * sd_y + mean_y; //
    }
 }

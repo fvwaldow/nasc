@@ -30,13 +30,13 @@ stan::math::profile_map profiles__;
 static constexpr std::array<const char*, 47> locations_array__ =
   {" (found before start of program)",
   " (in 'string', line 44, column 3 to column 23)",
-  " (in 'string', line 45, column 3 to column 19)",
+  " (in 'string', line 45, column 3 to column 16)",
   " (in 'string', line 54, column 3 to column 19)",
   " (in 'string', line 55, column 3 to column 25)",
-  " (in 'string', line 57, column 6 to column 67)",
+  " (in 'string', line 57, column 6 to column 64)",
   " (in 'string', line 56, column 18 to line 58, column 4)",
   " (in 'string', line 56, column 3 to line 58, column 4)",
-  " (in 'string', line 60, column 6 to column 73)",
+  " (in 'string', line 60, column 6 to column 70)",
   " (in 'string', line 59, column 23 to line 61, column 4)",
   " (in 'string', line 59, column 3 to line 61, column 4)",
   " (in 'string', line 49, column 3 to column 23)",
@@ -316,7 +316,7 @@ public:
           stan::model::index_uni(k));
       }
       current_statement__ = 44;
-      stan::math::validate_positive_index("beta", "K", K);
+      stan::math::validate_positive_index("w", "K", K);
       current_statement__ = 45;
       stan::math::validate_non_negative_index("y_sim", "N", N);
       current_statement__ = 46;
@@ -357,17 +357,17 @@ public:
       current_statement__ = 1;
       sigma = in__.template read_constrain_lb<local_scalar_t__,
                 jacobian__>(0, lp__);
-      Eigen::Matrix<local_scalar_t__,-1,1> beta =
+      Eigen::Matrix<local_scalar_t__,-1,1> w =
         Eigen::Matrix<local_scalar_t__,-1,1>::Constant(K, DUMMY_VAR__);
       current_statement__ = 2;
-      beta = in__.template read_constrain_simplex<
-               Eigen::Matrix<local_scalar_t__,-1,1>, jacobian__>(lp__, K);
+      w = in__.template read_constrain_simplex<
+            Eigen::Matrix<local_scalar_t__,-1,1>, jacobian__>(lp__, K);
       {
         current_statement__ = 11;
         lp_accum__.add(stan::math::normal_lpdf<propto__>(sigma, 0, 1));
         current_statement__ = 12;
         lp_accum__.add(stan::math::normal_lpdf<false>(y_std,
-                         stan::math::multiply(X_std, beta), sigma));
+                         stan::math::multiply(X_std, w), sigma));
       }
     } catch (const std::exception& e) {
       stan::lang::rethrow_located(e, locations_array__[current_statement__]);
@@ -410,14 +410,14 @@ public:
       current_statement__ = 1;
       sigma = in__.template read_constrain_lb<local_scalar_t__,
                 jacobian__>(0, lp__);
-      Eigen::Matrix<double,-1,1> beta =
+      Eigen::Matrix<double,-1,1> w =
         Eigen::Matrix<double,-1,1>::Constant(K,
           std::numeric_limits<double>::quiet_NaN());
       current_statement__ = 2;
-      beta = in__.template read_constrain_simplex<
-               Eigen::Matrix<local_scalar_t__,-1,1>, jacobian__>(lp__, K);
+      w = in__.template read_constrain_simplex<
+            Eigen::Matrix<local_scalar_t__,-1,1>, jacobian__>(lp__, K);
       out__.write(sigma);
-      out__.write(beta);
+      out__.write(w);
       if (stan::math::logical_negation(
             (stan::math::primitive_value(emit_transformed_parameters__) ||
             stan::math::primitive_value(emit_generated_quantities__)))) {
@@ -439,7 +439,7 @@ public:
           ((stan::math::normal_rng(
               stan::math::multiply(
                 stan::model::rvalue(X_std, "X_std",
-                  stan::model::index_uni(i), stan::model::index_omni()), beta),
+                  stan::model::index_uni(i), stan::model::index_omni()), w),
               sigma, base_rng__) * sd_y) + mean_y),
           "assigning variable y_sim", stan::model::index_uni(i));
       }
@@ -450,7 +450,7 @@ public:
           ((stan::math::normal_rng(
               stan::math::multiply(
                 stan::model::rvalue(X_pred_std, "X_pred_std",
-                  stan::model::index_uni(j), stan::model::index_omni()), beta),
+                  stan::model::index_uni(j), stan::model::index_omni()), w),
               sigma, base_rng__) * sd_y) + mean_y),
           "assigning variable y_pred", stan::model::index_uni(j));
       }
@@ -480,13 +480,13 @@ public:
       current_statement__ = 1;
       sigma = in__.read<local_scalar_t__>();
       out__.write_free_lb(0, sigma);
-      Eigen::Matrix<local_scalar_t__,-1,1> beta =
+      Eigen::Matrix<local_scalar_t__,-1,1> w =
         Eigen::Matrix<local_scalar_t__,-1,1>::Constant(K, DUMMY_VAR__);
       current_statement__ = 2;
-      stan::model::assign(beta,
+      stan::model::assign(w,
         in__.read<Eigen::Matrix<local_scalar_t__,-1,1>>(K),
-        "assigning variable beta");
-      out__.write_free_simplex(beta);
+        "assigning variable w");
+      out__.write_free_simplex(w);
     } catch (const std::exception& e) {
       stan::lang::rethrow_located(e, locations_array__[current_statement__]);
     }
@@ -506,7 +506,7 @@ public:
       context__.validate_dims("parameter initialization", "sigma", "double",
         std::vector<size_t>{});
       current_statement__ = 2;
-      context__.validate_dims("parameter initialization", "beta", "double",
+      context__.validate_dims("parameter initialization", "w", "double",
         std::vector<size_t>{static_cast<size_t>(K)});
       int pos__ = std::numeric_limits<int>::min();
       pos__ = 1;
@@ -514,24 +514,24 @@ public:
       current_statement__ = 1;
       sigma = context__.vals_r("sigma")[(1 - 1)];
       out__.write_free_lb(0, sigma);
-      Eigen::Matrix<local_scalar_t__,-1,1> beta =
+      Eigen::Matrix<local_scalar_t__,-1,1> w =
         Eigen::Matrix<local_scalar_t__,-1,1>::Constant(K, DUMMY_VAR__);
       {
-        std::vector<local_scalar_t__> beta_flat__;
+        std::vector<local_scalar_t__> w_flat__;
         current_statement__ = 2;
-        beta_flat__ = context__.vals_r("beta");
+        w_flat__ = context__.vals_r("w");
         current_statement__ = 2;
         pos__ = 1;
         current_statement__ = 2;
         for (int sym1__ = 1; sym1__ <= K; ++sym1__) {
           current_statement__ = 2;
-          stan::model::assign(beta, beta_flat__[(pos__ - 1)],
-            "assigning variable beta", stan::model::index_uni(sym1__));
+          stan::model::assign(w, w_flat__[(pos__ - 1)],
+            "assigning variable w", stan::model::index_uni(sym1__));
           current_statement__ = 2;
           pos__ = (pos__ + 1);
         }
       }
-      out__.write_free_simplex(beta);
+      out__.write_free_simplex(w);
     } catch (const std::exception& e) {
       stan::lang::rethrow_located(e, locations_array__[current_statement__]);
     }
@@ -540,7 +540,7 @@ public:
   get_param_names(std::vector<std::string>& names__, const bool
                   emit_transformed_parameters__ = true, const bool
                   emit_generated_quantities__ = true) const {
-    names__ = std::vector<std::string>{"sigma", "beta"};
+    names__ = std::vector<std::string>{"sigma", "w"};
     if (emit_transformed_parameters__) {}
     if (emit_generated_quantities__) {
       std::vector<std::string> temp{"y_sim", "y_pred"};
@@ -569,7 +569,7 @@ public:
                           emit_generated_quantities__ = true) const final {
     param_names__.emplace_back(std::string() + "sigma");
     for (int sym1__ = 1; sym1__ <= K; ++sym1__) {
-      param_names__.emplace_back(std::string() + "beta" + '.' +
+      param_names__.emplace_back(std::string() + "w" + '.' +
         std::to_string(sym1__));
     }
     if (emit_transformed_parameters__) {}
@@ -590,7 +590,7 @@ public:
                             emit_generated_quantities__ = true) const final {
     param_names__.emplace_back(std::string() + "sigma");
     for (int sym1__ = 1; sym1__ <= (K - 1); ++sym1__) {
-      param_names__.emplace_back(std::string() + "beta" + '.' +
+      param_names__.emplace_back(std::string() + "w" + '.' +
         std::to_string(sym1__));
     }
     if (emit_transformed_parameters__) {}
@@ -606,10 +606,10 @@ public:
     }
   }
   inline std::string get_constrained_sizedtypes() const {
-    return std::string("[{\"name\":\"sigma\",\"type\":{\"name\":\"real\"},\"block\":\"parameters\"},{\"name\":\"beta\",\"type\":{\"name\":\"vector\",\"length\":" + std::to_string(K) + "},\"block\":\"parameters\"},{\"name\":\"y_sim\",\"type\":{\"name\":\"vector\",\"length\":" + std::to_string(N) + "},\"block\":\"generated_quantities\"},{\"name\":\"y_pred\",\"type\":{\"name\":\"vector\",\"length\":" + std::to_string(N_pred) + "},\"block\":\"generated_quantities\"}]");
+    return std::string("[{\"name\":\"sigma\",\"type\":{\"name\":\"real\"},\"block\":\"parameters\"},{\"name\":\"w\",\"type\":{\"name\":\"vector\",\"length\":" + std::to_string(K) + "},\"block\":\"parameters\"},{\"name\":\"y_sim\",\"type\":{\"name\":\"vector\",\"length\":" + std::to_string(N) + "},\"block\":\"generated_quantities\"},{\"name\":\"y_pred\",\"type\":{\"name\":\"vector\",\"length\":" + std::to_string(N_pred) + "},\"block\":\"generated_quantities\"}]");
   }
   inline std::string get_unconstrained_sizedtypes() const {
-    return std::string("[{\"name\":\"sigma\",\"type\":{\"name\":\"real\"},\"block\":\"parameters\"},{\"name\":\"beta\",\"type\":{\"name\":\"vector\",\"length\":" + std::to_string((K -1)) + "},\"block\":\"parameters\"},{\"name\":\"y_sim\",\"type\":{\"name\":\"vector\",\"length\":" + std::to_string(N) + "},\"block\":\"generated_quantities\"},{\"name\":\"y_pred\",\"type\":{\"name\":\"vector\",\"length\":" + std::to_string(N_pred) + "},\"block\":\"generated_quantities\"}]");
+    return std::string("[{\"name\":\"sigma\",\"type\":{\"name\":\"real\"},\"block\":\"parameters\"},{\"name\":\"w\",\"type\":{\"name\":\"vector\",\"length\":" + std::to_string((K -1)) + "},\"block\":\"parameters\"},{\"name\":\"y_sim\",\"type\":{\"name\":\"vector\",\"length\":" + std::to_string(N) + "},\"block\":\"generated_quantities\"},{\"name\":\"y_pred\",\"type\":{\"name\":\"vector\",\"length\":" + std::to_string(N_pred) + "},\"block\":\"generated_quantities\"}]");
   }
   // Begin method overload boilerplate
   template <typename RNG> inline void
