@@ -54,12 +54,9 @@ nascSynth <- R6::R6Class(
     intervention = NULL,
     fitted = NULL,
     plot_data = NULL,
-    time_tiles_cache = NULL,
     stan_model = NULL,
     y_synth_draws = NULL,
-    lift_draws = NULL,
     treated_ids = NULL,
-    mcmc_checks = NULL,
     # Internal flags:
     #   uses_rho   - TRUE iff penalty or bias correction is active. Determines
     #                whether s (and therefore rho/W/w_J1) is needed at all.
@@ -68,9 +65,6 @@ nascSynth <- R6::R6Class(
     uses_step1 = NULL
   ),
   active = list(
-    #' @field timeTiles ggplot2 tile chart of treatment status over time.
-    timeTiles = function() { return(private$time_tiles_cache) },
-
     #' @field plotData Tibble with observed and counterfactual outcomes.
     plotData = function() { return(private$plot_data) },
 
@@ -103,13 +97,7 @@ nascSynth <- R6::R6Class(
         ggplot2::geom_vline(
           xintercept = private$intervention, linetype = "dashed"
         )
-    },
-
-    #' @field checks MCMC diagnostics from the fitted Stan model.
-    checks = function() { private$mcmc_checks },
-
-    #' @field lift Lift draws (if computed).
-    lift = function() { private$lift_draws }
+    }
   ),
   public = list(
 
@@ -232,9 +220,9 @@ nascSynth <- R6::R6Class(
 
       if (!setequal(
         data |>
-          dplyr::select(!!private$treated) |>
-          dplyr::distinct() |>
-          dplyr::pull({{ treated }}),
+        dplyr::select(!!private$treated) |>
+        dplyr::distinct() |>
+        dplyr::pull({{ treated }}),
         c(1, 0)
       )) {
         stop("Treated identifier is not binary (1/0).")
@@ -273,13 +261,6 @@ nascSynth <- R6::R6Class(
         ) |>
         dplyr::pull(!!private$time)
 
-      private$time_tiles_cache <- .time_tiles(
-        data   = private$data,
-        time   = private$time,
-        id     = private$id,
-        status = rlang::quo(status)
-      )
-
       # Stan model dispatch
       private$stan_model <- list(
         step1 = if (private$uses_step1) {
@@ -317,6 +298,14 @@ nascSynth <- R6::R6Class(
       X      <- pre_data  |> dplyr::select(-!!private$time, -!!private$treated, -!!private$outcome)
       X1     <- pre_data  |> dplyr::pull(!!private$outcome)
       X_pred <- post_data |> dplyr::select(-!!private$time, -!!private$treated, -!!private$outcome)
+
+      # Number of *real* pre-treatment time periods. The covariate-as-extra-rows
+      # feature below (model1 engine only) appends synthetic rows to X/X1 so the
+      # Stan model also matches predictors. Stan then returns y_sim_pre with one
+      # entry per row of X (i.e. n_pre_real + n_covariate_rows). We need to
+      # remember n_pre_real here so we can slice y_sim_pre back down to real
+      # time periods before post-processing.
+      n_pre_real <- nrow(pre_data)
 
       # Covariate-as-extra-rows feature (Abadie-style predictor matching).
       # Only applied for the model1 engine, since stan_2_NASC's Y_panel has
@@ -590,9 +579,13 @@ nascSynth <- R6::R6Class(
             pars = c("y_counterfactual", "y_sim_pre", "w", "sigma",
                      "bias_correction")
           )
+          # y_sim_pre has one column per row of X. When covariate rows were
+          # stacked above, those trailing columns aren't real time periods --
+          # drop them so the post-processing aligns with pre_data.
+          y_sim_pre_trim <- draws$y_sim_pre[, seq_len(n_pre_real), drop = FALSE]
           private$y_synth_draws <- list(
             y_counterfactual = draws$y_counterfactual,
-            y_sim_pre        = draws$y_sim_pre,
+            y_sim_pre        = y_sim_pre_trim,
             w                = draws$w,
             sigma            = draws$sigma,
             bias_correction  = draws$bias_correction,  # all 1.0 in this branch
@@ -616,9 +609,12 @@ nascSynth <- R6::R6Class(
 
           if (is.null(private$fitted)) private$fitted <- results$last_fit
 
+          # See the no-bias-correction branch above: drop covariate rows from
+          # y_sim_pre so it aligns with pre_data.
+          y_sim_pre_trim <- results$y_sim_pre[, seq_len(n_pre_real), drop = FALSE]
           private$y_synth_draws <- list(
             y_counterfactual = results$y_counterfactual,
-            y_sim_pre        = results$y_sim_pre,
+            y_sim_pre        = y_sim_pre_trim,
             w                = results$w,
             sigma            = results$sigma,
             bias_correction  = results$bias_correction,
@@ -670,25 +666,67 @@ nascSynth <- R6::R6Class(
     },
 
     #' @description
-    #' Summarise the posterior lift (requires lift draws to have been computed).
-    summarizeLift = function() {
-      if (is.null(private$lift_draws)) {
-        stop("Run liftDraws() first.")
+    #' Posterior summary of the fit: ATT, per-period treatment effects,
+    #' donor weights, model parameters and MCMC diagnostics. Prints a
+    #' formatted summary and invisibly returns a \code{summary.nascSynth}
+    #' list. Also dispatched from \code{summary(obj)} via the S3 method
+    #' \code{summary.nascSynth}.
+    #' @param ci_width Optional override for the credible interval width.
+    #' @param print Logical; if \code{TRUE} (default), print the formatted
+    #'   summary to the console. Set to \code{FALSE} to retrieve the
+    #'   structured list silently for programmatic use.
+    summary = function(ci_width = NULL, print = TRUE) {
+      if (is.null(private$y_synth_draws)) {
+        stop("Run $fit() before calling summary().")
       }
-      c(
-        point       = mean(private$lift_draws$lift),
-        lower_bound = stats::quantile(
-          private$lift_draws$lift, (1 - private$ci_width) / 2
-        ),
-        upper_bound = stats::quantile(
-          private$lift_draws$lift, 1 - (1 - private$ci_width) / 2
-        )
-      )
+      ci <- if (is.null(ci_width)) private$ci_width else {
+        stopifnot(is.numeric(ci_width), length(ci_width) == 1L,
+                  ci_width > 0, ci_width < 1)
+        ci_width
+      }
+
+      # Reconstruct the rho-source string the constructor printed, so the
+      # summary stays self-describing without needing to capture it earlier.
+      rho_source <- if (!private$uses_rho) {
+        "n/a (no rho in use)"
+      } else if (!is.null(private$rho_exogenous)) {
+        sprintf("exogenous (rho = %.4f)", private$rho_exogenous)
+      } else {
+        sprintf("Step 1 %s posterior", private$spatial_model)
+      }
+
+      out <- .nasc_summary_stats(list(
+        y_synth_draws   = private$y_synth_draws,
+        plot_data       = private$plot_data,
+        intervention    = private$intervention,
+        time            = private$time,
+        outcome         = private$outcome,
+        ci_width        = ci,
+        treated_ids     = private$treated_ids,
+        id_levels       = private$data[[rlang::as_name(private$id)]],
+        spatial_model   = private$spatial_model,
+        bias_correction = private$bias_correction,
+        nasc_penalty    = private$nasc_penalty,
+        uses_rho        = private$uses_rho,
+        rho_source      = rho_source,
+        fitted          = private$fitted
+      ))
+
+      # Print the formatted summary explicitly. This works even if the S3
+      # method `print.summary.nascSynth` was not registered in NAMESPACE,
+      # because we're calling the function by its full name from the
+      # package namespace rather than going through S3 dispatch. Return
+      # invisibly so the structured list is still available via
+      # `s <- synth_sc$summary()` without spamming the console twice.
+      if (isTRUE(print)) {
+        print.summary.nascSynth(out)
+      }
+      invisible(out)
     },
 
     #' @description
     #' Plot the estimated treatment effect (tau) over time.
-    effectPlot = function(facet = TRUE, subset = NULL) {
+    effectPlot = function() {
       .plot_tau(
         data       = private$plot_data,
         x          = private$time,
@@ -778,4 +816,3 @@ nascSynth <- R6::R6Class(
     }
   )
 )
-
