@@ -477,6 +477,14 @@
   out
 }
 
+#' Print method for nascSynth summary objects
+#'
+#' @param x A \code{summary.nascSynth} object.
+#' @param digits Number of significant digits to display. Default \code{3}.
+#' @param max_donors Maximum number of donor weights to display.
+#'   Default \code{10}.
+#' @param ... Additional arguments (ignored).
+#' @return Invisibly returns \code{x}.
 #' @export
 print.summary.nascSynth <- function(x, digits = 3, max_donors = 10, ...) {
   h <- x$header
@@ -659,6 +667,14 @@ print.summary.nascSynth <- function(x, digits = 3, max_donors = 10, ...) {
   invisible(x)
 }
 
+#' Summary method for nascSynth objects
+#'
+#' Dispatches to the \code{$summary()} method of the
+#' \code{\link{nascSynth}} R6 object.
+#'
+#' @param object A \code{nascSynth} object.
+#' @param ... Additional arguments passed to \code{object$summary()}.
+#' @return Invisibly returns a \code{summary.nascSynth} list.
 #' @export
 summary.nascSynth <- function(object, ...) {
   invisible(object$summary(...))

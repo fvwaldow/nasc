@@ -1,48 +1,53 @@
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
-# nasc - Network-Aware Synthetic Control R Package
+# nasc
 
-## Introduction
+<!-- badges: start -->
 
-`nasc` is a R package that implements the Network-Aware Synthetic
-Control (NASC) Estimator. This package is based on the methodology of
-von Waldow (2026), adressing the limitations of conventional synthetic
-control methods when SUTVA is violated and interference between units
-prevails.
+<!-- badges: end -->
+
+The goal of nasc is to …
 
 ## Installation
 
-The most recent version of `nasc` can be installed from
+You can install the development version of nasc from
 [GitHub](https://github.com/) with:
 
 ``` r
-# install.packages("devtools")
-devtools::install_github("fvwaldow/nasc")
+# install.packages("pak")
+pak::pak("fvwaldow/nasc")
 ```
 
-## Quick Start
+## Example
+
+This is a basic example which shows you how to solve a common problem:
 
 ``` r
 library(nasc)
-
-# View basic package information
-packageDescription("nasc")
-
-# List all functions in the package
-ls("package:nasc")
+## basic example code
 ```
 
-## Usage
+What is special about using `README.Rmd` instead of just `README.md`?
+You can include R chunks like so:
 
-### Core Functions
+``` r
+summary(cars)
+#>      speed           dist       
+#>  Min.   : 4.0   Min.   :  2.00  
+#>  1st Qu.:12.0   1st Qu.: 26.00  
+#>  Median :15.0   Median : 36.00  
+#>  Mean   :15.4   Mean   : 42.98  
+#>  3rd Qu.:19.0   3rd Qu.: 56.00  
+#>  Max.   :25.0   Max.   :120.00
+```
 
-### Visualization Functions
+You’ll still need to render `README.Rmd` regularly, to keep `README.md`
+up-to-date. `devtools::build_readme()` is handy for this.
 
-## Methodological Notes
+You can also embed plots, for example:
 
-## Citation
+<img src="man/figures/README-pressure-1.png" width="100%" />
 
-## License
-
-MIT License
+In that case, don’t forget to commit and push the resulting figure
+files, so they display on GitHub and CRAN.

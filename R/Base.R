@@ -112,6 +112,22 @@ nascSynth <- R6::R6Class(
     #' @description
     #' Create a new nascSynth object.
     #'
+    #' @param data A data frame in long format containing the panel data.
+    #'   Must include columns for the unit identifier, time, outcome, and
+    #'   a binary treatment indicator (1 = treated, 0 = untreated).
+    #' @param time Unquoted column name for the time variable.
+    #' @param id Unquoted column name for the unit identifier.
+    #' @param treated Unquoted column name for the binary treatment indicator
+    #'   (1 in treated periods for the treated unit, 0 otherwise).
+    #' @param outcome Unquoted column name for the outcome variable.
+    #' @param ci_width Numeric in \code{(0, 1)}. Width of the credible interval.
+    #'   Default is \code{0.75}.
+    #' @param covariates Optional data frame in long format with columns for
+    #'   \code{id}, \code{time}, and one or more predictor variables. Required
+    #'   when \code{spatial_model} is \code{"SAR"} or \code{"SDM"}.
+    #' @param W Optional row-standardized spatial weights matrix. Row and column
+    #'   names should match the unit identifiers in \code{data}. Required when
+    #'   \code{bias_correction = TRUE} or \code{nasc_penalty = TRUE}.
     #' @param spatial_model One of \code{"none"}, \code{"SAR"}, \code{"SDM"},
     #'   or \code{"exogenous"}.
     #' @param rho Optional scalar in \code{(-1, 1)}. When supplied, Step 1 is
@@ -119,7 +135,8 @@ nascSynth <- R6::R6Class(
     #'   \code{spatial_model}. Required when \code{spatial_model = "exogenous"}.
     #' @param bias_correction Logical. If \code{TRUE}, the post-treatment
     #'   counterfactual is rescaled by \eqn{1/(1 - w's)}. Default is \code{TRUE}
-    #'   for SAR/SDM/exogenous and \code{FALSE} for \code{spatial_model = "none"}.
+    #'   for SAR/SDM/exogenous and \code{FALSE} for
+    #'   \code{spatial_model = "none"}.
     #' @param nasc_penalty Logical. If \code{TRUE}, the NASC penalty
     #'   \eqn{-\lambda \langle w, |s| \rangle} enters the likelihood. Same
     #'   model-aware default as \code{bias_correction}.
