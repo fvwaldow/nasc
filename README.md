@@ -20,8 +20,7 @@ The development version of `nasc` can be installed from
 [GitHub](https://github.com/) with:
 
 ``` r
-# install.packages("devtools")
-devtools::install_github("fvwaldow/nasc")
+pak::pkg_install("fvwaldow/nasc")
 ```
 
 As the package compiles Stan models at install time, a working C++

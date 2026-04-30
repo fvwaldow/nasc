@@ -707,62 +707,96 @@ nascSynth <- R6::R6Class(
 
     #' @description
     #' Posterior density plots of the main scalar Bayesian parameters
-    #' (e.g. \code{rho}, \code{sigma}). One panel per parameter; vertical
-    #' lines show the posterior mean and the credible-interval bounds.
-    #' @param pars Optional character vector of parameter names to plot.
-    #'   Defaults to all scalar parameters available in the stanfit object,
-    #'   excluding \code{lp__} and high-dimensional vectors like \code{w}.
-    #' @param ci Credible interval width (default uses the object's setting).
-    posteriorPlot = function(pars = NULL, ci = NULL) {
-      if (is.null(private$fitted)) stop("Run fit() first.")
-      ci <- if (is.null(ci)) private$ci_width else ci
+    #' \code{rho} and (when included in the model) \code{theta}. Each
+    #' parameter is shown in its own panel as a color-filled density curve.
+    spatialPlot = function() {
+      if (is.null(private$fitted)) stop("Run $fit() before calling spatialPlot.")
 
       draws <- rstan::extract(private$fitted, permuted = TRUE)
-      # Keep only scalar (vector) parameters to keep plotting tractable
-      scalar_pars <- names(draws)[vapply(draws, function(x) is.numeric(x) &&
-                                           (is.null(dim(x)) || length(dim(x)) == 1L),
-                                         logical(1))]
-      scalar_pars <- setdiff(scalar_pars, "lp__")
-      if (!is.null(pars)) scalar_pars <- intersect(pars, scalar_pars)
+
+      # Restrict to rho and theta (if present in the fitted model)
+      target_pars <- c("rho", "theta")
+      scalar_pars <- intersect(target_pars, names(draws))
 
       if (length(scalar_pars) == 0L) {
-        stop("No scalar parameters found to plot.")
+        stop("Neither 'rho' nor 'theta' found in the fitted stan object.")
       }
 
-      probs <- c((1 - ci) / 2, 1 - (1 - ci) / 2)
       n <- length(scalar_pars)
-      nc <- ceiling(sqrt(n)); nr <- ceiling(n / nc)
-
       op <- graphics::par(no.readonly = TRUE)
       on.exit(graphics::par(op))
-      graphics::par(mfrow = c(nr, nc), mar = c(4, 4, 2, 1), bty = "l")
+      # Stack panels vertically for consistency with the other plots
+      graphics::par(mfrow = c(n, 1),
+                    mar = c(4, 5, 2, 1),
+                    bty = "l")
 
       for (p in scalar_pars) {
         x <- as.numeric(draws[[p]])
         d <- stats::density(x, na.rm = TRUE)
-        m <- mean(x, na.rm = TRUE)
-        q <- stats::quantile(x, probs, na.rm = TRUE, names = FALSE)
 
-        plot(d, main = p, xlab = p, ylab = "density")
-        graphics::polygon(d, col = grDevices::adjustcolor("steelblue", alpha.f = 0.3),
+        plot(d, main = paste0(p, ""),
+             xlab = p, ylab = "density")
+        graphics::polygon(d,
+                          col = grDevices::adjustcolor("steelblue", alpha.f = 0.3),
                           border = "steelblue")
-        graphics::abline(v = m, lwd = 2)
-        graphics::abline(v = q, lty = 2, col = "gray30")
       }
+
+      invisible(NULL)
+    },
+
+    #' @description
+    #' Posterior density plot of the average treatment effect on the treated
+    #' (ATT), pooled across all post-treatment periods. The density is shown
+    #' as a color-filled curve.
+    attPlot = function() {
+      if (is.null(private$y_synth_draws)) stop("Run $fit() before calling attPlot.")
+
+      # Reconstruct tau draws
+      ycf <- private$y_synth_draws$y_counterfactual
+      bc  <- private$y_synth_draws$bias_correction
+      if (is.null(bc)) bc <- rep(1, ncol(ycf))
+
+      wide_df <- .makeWide(
+        data      = private$data,
+        id        = private$id,
+        time      = private$time,
+        outcome   = private$outcome,
+        treatment = private$treated
+      )
+      post_data <- wide_df |>
+        dplyr::filter(!!private$time >= private$intervention)
+      Y1_post <- post_data[[rlang::as_name(private$outcome)]]
+
+      Y1_mat <- matrix(Y1_post, nrow = nrow(ycf), ncol = length(Y1_post),
+                       byrow = TRUE)
+      bc_mat <- matrix(bc, nrow = nrow(ycf), ncol = ncol(ycf), byrow = FALSE)
+      tau_draws <- (Y1_mat - ycf) * bc_mat
+      att_draws <- rowMeans(tau_draws)
+
+      op <- graphics::par(no.readonly = TRUE)
+      on.exit(graphics::par(op))
+      graphics::par(mar = c(4, 5, 2, 1), bty = "l")
+
+      d_att <- stats::density(att_draws, na.rm = TRUE)
+
+      plot(d_att, main = "",
+           xlab = "ATT", ylab = "density")
+      graphics::polygon(d_att,
+                        col = grDevices::adjustcolor("steelblue", alpha.f = 0.3),
+                        border = "steelblue")
+
       invisible(NULL)
     },
 
     #' @description
     #' Posterior density plots of the period-by-period treatment effects
-    #' (\code{tau_t}) for all post-treatment periods, plus the ATT.
-    #' Each post-period density is drawn as a stacked, color-filled curve
-    #' (ridge-style); the ATT is shown in a separate panel below.
-    #' @param ci Credible interval width (default uses the object's setting).
-    tauPosteriorPlot = function(ci = NULL) {
-      if (is.null(private$y_synth_draws)) stop("Run fit() first.")
-      ci <- if (is.null(ci)) private$ci_width else ci
+    #' (\code{tau_t}) for all post-treatment periods. Each post-period density
+    #' is drawn in its own stacked panel as a color-filled curve. All panels
+    #' share a common x-axis for visual comparability across periods.
+    tauPlot = function() {
+      if (is.null(private$y_synth_draws)) stop("Run $fit() before calling tauPlot.")
 
-      # Reconstruct tau draws: matrix [n_draws x n_post_periods]
+      # Reconstruct tau draws
       ycf <- private$y_synth_draws$y_counterfactual
       bc  <- private$y_synth_draws$bias_correction
       if (is.null(bc)) bc <- rep(1, ncol(ycf))
@@ -783,51 +817,37 @@ nascSynth <- R6::R6Class(
                        byrow = TRUE)
       bc_mat <- matrix(bc, nrow = nrow(ycf), ncol = ncol(ycf), byrow = FALSE)
       tau_draws <- (Y1_mat - ycf) * bc_mat
-      att_draws <- rowMeans(tau_draws)
 
-      probs <- c((1 - ci) / 2, 1 - (1 - ci) / 2)
+      n_t <- ncol(tau_draws)
+
+      # Common x-axis across all panels for visual comparability
+      dens_list <- lapply(seq_len(n_t),
+                          function(i) stats::density(tau_draws[, i], na.rm = TRUE))
+      xr <- range(sapply(dens_list, function(d) d$x))
 
       op <- graphics::par(no.readonly = TRUE)
       on.exit(graphics::par(op))
-      graphics::par(mfrow = c(2, 1), mar = c(4, 5, 2, 1), bty = "l")
+      graphics::par(mfrow = c(n_t, 1),
+                    mar = c(2, 5, 1.2, 1),
+                    oma = c(3, 0, 2, 0),
+                    bty = "l")
 
-      # ---- Panel 1: per-period tau ridges ----
-      n_t <- ncol(tau_draws)
-      dens <- lapply(seq_len(n_t),
-                     function(i) stats::density(tau_draws[, i], na.rm = TRUE))
-      xr <- range(sapply(dens, function(d) d$x))
-      max_y <- max(sapply(dens, function(d) max(d$y)))
-      offset <- max_y * 1.1
-
-      plot(NA, xlim = xr, ylim = c(0, offset * (n_t + 1)),
-           xlab = "tau", ylab = "",
-           yaxt = "n",
-           main = "Per-period treatment effect posteriors")
-      graphics::axis(2, at = offset * seq_len(n_t),
-                     labels = as.character(time_post), las = 1)
-      cols <- grDevices::hcl.colors(n_t, palette = "Viridis", alpha = 0.7)
       for (i in seq_len(n_t)) {
-        d <- dens[[i]]
-        y <- d$y + offset * i
-        graphics::polygon(c(d$x, rev(d$x)),
-                          c(y, rep(offset * i, length(d$x))),
-                          col = cols[i], border = "gray30")
+        d_i <- dens_list[[i]]
+
+        is_last <- i == n_t
+        plot(d_i,
+             main = paste0("Period ", time_post[i]),
+             xlab = if (is_last) "tau" else "",
+             ylab = "density",
+             xlim = xr,
+             xaxt = if (is_last) "s" else "n")
+        graphics::polygon(d_i,
+                          col = grDevices::adjustcolor("steelblue", alpha.f = 0.3),
+                          border = "steelblue")
       }
-      graphics::abline(v = 0, lty = 2)
-
-      # ---- Panel 2: ATT density ----
-      d_att <- stats::density(att_draws, na.rm = TRUE)
-      m_att <- mean(att_draws)
-      q_att <- stats::quantile(att_draws, probs, names = FALSE)
-
-      plot(d_att, main = "ATT posterior",
-           xlab = "ATT", ylab = "density")
-      graphics::polygon(d_att,
-                        col = grDevices::adjustcolor("steelblue", alpha.f = 0.3),
-                        border = "steelblue")
-      graphics::abline(v = m_att, lwd = 2)
-      graphics::abline(v = q_att, lty = 2, col = "gray30")
-      graphics::abline(v = 0, lty = 3, col = "red")
+      graphics::mtext("Per-period treatment effect posteriors",
+                      side = 3, outer = TRUE, line = 0.5, font = 2)
 
       invisible(NULL)
     },
@@ -835,7 +855,7 @@ nascSynth <- R6::R6Class(
     #' @description
     #' Plot implicit weight distribution across draws.
     weightDraws = function() {
-      if (is.null(private$fitted)) stop("Run fit() first.")
+      if (is.null(private$fitted)) stop("Run $fit() before calling weightDraws().")
 
       w_mat <- private$y_synth_draws$w
 
@@ -879,7 +899,7 @@ nascSynth <- R6::R6Class(
     #' @description
     #' Plot correlations between weights across draws.
     weightCorr = function() {
-      if (is.null(private$fitted)) stop("Run fit() first.")
+      if (is.null(private$fitted)) stop("Run $fit() before calling weightCorr().")
 
       w_mat <- private$y_synth_draws$w
 

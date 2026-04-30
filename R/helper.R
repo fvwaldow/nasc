@@ -679,3 +679,92 @@ print.summary.nascSynth <- function(x, digits = 3, max_donors = 10, ...) {
 summary.nascSynth <- function(object, ...) {
   invisible(object$summary(...))
 }
+
+
+
+# ----------------------------------------------------------------------------
+# Internal: pull what we need out of a fitted nascSynth object and rebuild
+# the posterior draws of s. Returns a list with donor_names, treated_id,
+# w_mat (draws x J), s_mat (draws x J), W_full, rhos_used.
+# ----------------------------------------------------------------------------
+.nasc_contamination_draws <- function(model) {
+
+  if (!inherits(model, "nascSynth")) {
+    stop("'model' must be a fitted nascSynth object.")
+  }
+  priv <- model$.__enclos_env__$private
+  if (is.null(priv$y_synth_draws)) {
+    stop("Run $fit() before requesting contamination plots.")
+  }
+  if (!isTRUE(priv$uses_rho) || is.null(priv$W)) {
+    stop(
+      "Contamination plots require a spatial weights matrix and a non-trivial ",
+      "rho. Re-fit with bias_correction = TRUE or nasc_penalty = TRUE."
+    )
+  }
+
+  w_mat <- priv$y_synth_draws$w
+  if (is.null(w_mat)) {
+    stop("Posterior draws of donor weights 'w' are missing from the fit.")
+  }
+
+  treated_id  <- as.character(priv$treated_ids)
+  all_ids     <- levels(priv$data[[rlang::as_name(priv$id)]])
+  donor_names <- setdiff(all_ids, treated_id)
+
+  if (ncol(w_mat) != length(donor_names)) {
+    stop("Mismatch between number of weight columns and donor names.")
+  }
+  colnames(w_mat) <- donor_names
+
+  # Reorder W to put donors first, treated last (mirrors logic in $fit())
+  W_full <- as.matrix(priv$W)
+  if (is.null(rownames(W_full)) || is.null(colnames(W_full))) {
+    rownames(W_full) <- colnames(W_full) <- all_ids
+  }
+  W_full <- W_full[c(donor_names, treated_id), c(donor_names, treated_id)]
+  J <- length(donor_names)
+  W_J <- W_full[seq_len(J), seq_len(J), drop = FALSE]
+
+  # Reconstruct s_draws = rho_d * (W_J %*% w_d) for each draw d.
+  #
+  # `rhos_used` may have one of three shapes depending on the fit path:
+  #   * length 1                 : exogenous rho or single-fit Step 2.
+  #   * length == nrow(w_mat)    : one rho per posterior draw (single-fit
+  #                                Stan stored it that way for bookkeeping).
+  #   * length == n_workers      : multi-rho parallel loop -- each worker
+  #                                ran with one fixed rho and contributed
+  #                                draws_per_worker rows to w_mat. Expand
+  #                                each worker's rho across its draws.
+  rhos    <- priv$y_synth_draws$rhos_used
+  n_draws <- nrow(w_mat)
+
+  if (length(rhos) == 1L) {
+    rhos_per_draw <- rep(rhos, n_draws)
+  } else if (length(rhos) == n_draws) {
+    rhos_per_draw <- rhos
+  } else if (n_draws %% length(rhos) == 0L) {
+    draws_per_worker <- n_draws %/% length(rhos)
+    rhos_per_draw    <- rep(rhos, each = draws_per_worker)
+  } else {
+    warning("rhos_used has length ", length(rhos),
+            " but w has ", n_draws, " draws; using the posterior mean of ",
+            "rho for all draws.")
+    rhos_per_draw <- rep(mean(rhos, na.rm = TRUE), n_draws)
+  }
+  rhos <- rhos_per_draw
+
+  # s_mat[d, ] = rhos[d] * (W_J %*% w_mat[d, ])
+  # (W_J %*% t(w_mat)) gives J x n_draws; transpose and scale row-wise.
+  s_mat <- t(W_J %*% t(w_mat)) * rhos
+  colnames(s_mat) <- donor_names
+
+  list(
+    donor_names = donor_names,
+    treated_id  = treated_id,
+    w_mat       = w_mat,
+    s_mat       = s_mat,
+    W_full      = W_full,
+    rhos_used   = rhos
+  )
+}
