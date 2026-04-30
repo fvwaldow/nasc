@@ -31,7 +31,7 @@
 #'   posterior mean of \eqn{s_j} and \eqn{|s_j|}.
 #'
 #' @export
-nasc_contamination_network <- function(model,
+contaminationPlot <- function(model,
                                        signed         = FALSE,
                                        edge_threshold = 1e-3,
                                        layout         = NULL,
@@ -40,7 +40,7 @@ nasc_contamination_network <- function(model,
                                        directed       = FALSE) {
 
   if (!requireNamespace("igraph", quietly = TRUE)) {
-    stop("Package 'igraph' is required for nasc_contamination_network(). ",
+    stop("Package 'igraph' is required for contaminationPlot(). ",
          "Install it via install.packages(\"igraph\").")
   }
 
@@ -187,7 +187,7 @@ nasc_contamination_network <- function(model,
 #'   contribution \eqn{\bar w_j |\bar s_j|}.
 #'
 #' @export
-nasc_contamination_scatter <- function(model,
+contaminationScatter <- function(model,
                                        signed = FALSE,
                                        label  = TRUE,
                                        top_n  = 10L) {

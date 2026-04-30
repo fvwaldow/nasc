@@ -23,7 +23,7 @@
 #'   drawing plots.
 #'
 #' @export
-compare_nasc_plots <- function(models, show_ci = FALSE) {
+nascPlot <- function(models, show_ci = FALSE) {
 
   if (!is.list(models) || is.null(names(models))) {
     stop("'models' must be a named list of fitted nascSynth objects.")
