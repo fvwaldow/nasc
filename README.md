@@ -1,45 +1,48 @@
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
-**NOTE: This is a toy package created for expository purposes, for the
-second edition of [R Packages](https://r-pkgs.org). It is not meant to
-actually be useful. If you want a package for factor handling, please
-see [stringr](https://stringr.tidyverse.org),
-[stringi](https://stringi.gagolewski.com/),
-[rex](https://cran.r-project.org/package=rex), and
-[rematch2](https://cran.r-project.org/package=rematch2).**
+# nasc - Network-Aware Synthetic Control R Package
 
-# regexcite
+## Introduction
 
-<!-- badges: start -->
-
-<!-- badges: end -->
-
-The goal of regexcite is to make regular expressions more exciting! It
-provides convenience functions to make some common tasks with string
-manipulation and regular expressions a bit easier.
+`nasc` is a R package that implements the Network-Aware Synthetic
+Control (NASC) Estimator. This package is based on the methodology of
+von Waldow (2026), adressing the limitations of conventional synthetic
+control methods when SUTVA is violated and interference between units
+prevails.
 
 ## Installation
 
-You can install the development version of regexcite from
+The most recent version of `nasc` can be installed from
 [GitHub](https://github.com/) with:
 
 ``` r
+# install.packages("devtools")
+devtools::install_github("fvwaldow/nasc")
+```
+
+## Quick Start
+
+``` r
+library(nasc)
+
+# View basic package information
+packageDescription("nasc")
+
+# List all functions in the package
+ls("package:nasc")
 ```
 
 ## Usage
 
-A fairly common task when dealing with strings is the need to split a
-single string into many parts. This is what … do.
+### Core Functions
 
-Notice how the return value is a **list** of length one, where the first
-element holds the character vector of parts. Often the shape of this
-output is inconvenient, i.e. we want the un-listed version.
+### Visualization Functions
 
-That’s exactly what .. does.
+## Methodological Notes
 
-Use … when the input is known to be a single string. For safety, it will
-error if its input has length greater than one.
+## Citation
 
-… is built on … , so you can use its … argument and stringr’s general
-interface for describing the … to be matched.
+## License
+
+MIT License

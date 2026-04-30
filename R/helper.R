@@ -9,7 +9,12 @@
 # chains (1) per worker.
 # ----------------------------------------------------------------------------
 .run_step2_loop <- function(rhos, base_data, step2_mod, rho_field, cores,
-                            extra_args, extract_pars) {
+                            extra_args, extract_pars,
+                            worker_iter = 2000L, worker_warmup = 1000L) {
+
+  stopifnot(worker_iter > worker_warmup, worker_warmup > 0)
+  worker_iter   <- as.integer(worker_iter)
+  worker_warmup <- as.integer(worker_warmup)
 
   if (length(rhos) == 1L) {
 
@@ -24,7 +29,6 @@
 
     draws <- rstan::extract(fit, pars = extract_pars)
 
-    # Replicate rho across draws for bookkeeping
     n_draws <- length(draws[[extract_pars[length(extract_pars)]]])
     if (is.matrix(draws[[1]])) n_draws <- nrow(draws[[1]])
 
@@ -40,7 +44,7 @@
     future::plan(future::multisession, workers = cores)
 
     run_worker <- function(single_rho, base_data, step2_mod, rho_field,
-                           extract_pars) {
+                           extract_pars, worker_iter, worker_warmup) {
       suppressPackageStartupMessages(require(rstan, quietly = TRUE))
       worker_data <- base_data
       worker_data[[rho_field]] <- single_rho
@@ -49,14 +53,41 @@
         object        = step2_mod,
         data          = worker_data,
         chains        = 1,
-        iter          = 1000,
-        warmup        = 500,
+        iter          = worker_iter,
+        warmup        = worker_warmup,
         refresh       = 0,
         show_messages = FALSE
       )
 
       draws <- rstan::extract(fit_step2, pars = extract_pars)
       draws$rho_used <- single_rho
+
+      diag_one <- tryCatch({
+        s <- rstan::summary(fit_step2)$summary
+        s <- s[!rownames(s) %in% "lp__", , drop = FALSE]
+        sp <- rstan::get_sampler_params(fit_step2, inc_warmup = FALSE)
+        sp1 <- if (length(sp)) sp[[1]] else NULL
+        max_td <- 10L
+        if (length(fit_step2@stan_args)) {
+          ctrl <- fit_step2@stan_args[[1]]$control
+          if (!is.null(ctrl$max_treedepth)) max_td <- ctrl$max_treedepth
+        }
+        list(
+          max_rhat    = if (nrow(s)) suppressWarnings(max(s[, "Rhat"],  na.rm = TRUE)) else NA_real_,
+          min_n_eff   = if (nrow(s)) suppressWarnings(min(s[, "n_eff"], na.rm = TRUE)) else NA_real_,
+          n_divergent = if (!is.null(sp1)) as.integer(sum(sp1[, "divergent__"])) else NA_integer_,
+          n_max_td    = if (!is.null(sp1) && "treedepth__" %in% colnames(sp1)) {
+            as.integer(sum(sp1[, "treedepth__"] >= max_td))
+          } else NA_integer_,
+          rho_used    = single_rho
+        )
+      }, error = function(e) {
+        list(max_rhat = NA_real_, min_n_eff = NA_real_,
+             n_divergent = NA_integer_, n_max_td  = NA_integer_,
+             rho_used = single_rho)
+      })
+
+      draws$diagnostics_one <- diag_one
       draws
     }
 
@@ -67,11 +98,13 @@
         rhos,
         function(rho) {
           res <- run_worker(
-            single_rho   = rho,
-            base_data    = base_data,
-            step2_mod    = step2_mod,
-            rho_field    = rho_field,
-            extract_pars = extract_pars
+            single_rho    = rho,
+            base_data     = base_data,
+            step2_mod     = step2_mod,
+            rho_field     = rho_field,
+            extract_pars  = extract_pars,
+            worker_iter   = worker_iter,
+            worker_warmup = worker_warmup
           )
           p()
           res
@@ -80,8 +113,6 @@
       )
     })
 
-    # Aggregate. Matrix-valued params (multi-dim draws) are rbound; scalar
-    # vector params are concatenated.
     out <- list()
     for (par in extract_pars) {
       first <- results_list[[1]][[par]]
@@ -92,36 +123,39 @@
       }
     }
     out$rhos_used <- vapply(results_list, \(x) x$rho_used, numeric(1))
-    out$last_fit  <- NULL  # workers run in subprocesses; no last_fit retained
+
+    diags <- lapply(results_list, \(x) x$diagnostics_one)
+    rhat_vec <- vapply(diags, \(d) d$max_rhat, numeric(1))
+    rhat_threshold <- 1.05
+    n_finite_rhat <- sum(is.finite(rhat_vec))
+    n_converged   <- sum(is.finite(rhat_vec) & rhat_vec <= rhat_threshold)
+    out$worker_diagnostics <- list(
+      converged_share   = if (n_finite_rhat > 0) n_converged / n_finite_rhat else NA_real_,
+      n_converged       = n_converged,
+      n_finite_rhat     = n_finite_rhat,
+      rhat_threshold    = rhat_threshold,
+      max_rhat_observed = suppressWarnings(max(rhat_vec, na.rm = TRUE)),
+      min_n_eff         = suppressWarnings(min(vapply(diags, \(d) d$min_n_eff,   numeric(1)),  na.rm = TRUE)),
+      total_divergent   = sum(vapply(diags, \(d) d$n_divergent,                  integer(1)),  na.rm = TRUE),
+      total_max_td      = sum(vapply(diags, \(d) d$n_max_td,                     integer(1)),  na.rm = TRUE),
+      n_workers         = length(results_list),
+      iter_per_worker   = worker_iter,
+      warmup_per_worker = worker_warmup
+    )
+
+    out$last_fit  <- NULL
     return(out)
   }
 }
 
 
-# Unified post-processing: extracts y_counterfactual and y_sim_pre draws,
-# multiplies tau by bias_correction (which is 1.0 when bias correction is off),
-# and builds plot_data. Used for ALL model paths after the harmonization of
-# generated-quantity names across model1.stan and stan_2_NASC.stan.
 .get_nasc_results <- function(y_counterfactual_draws, bias_correction_draws, y_sim_pre_draws, pre_data, post_data, time, outcome, ci = 0.75) {
-  # --- 1. POST-TREATMENT PERIOD ---
   post_times <- post_data |> dplyr::pull(!!time)
   Y1_post    <- post_data |> dplyr::pull(!!outcome)
 
-  # Replicate the post-treatment outcome to match the dimensions of the draws matrix
-  # (Rows = draws, Columns = time periods)
   Y1_mat <- matrix(Y1_post, nrow = nrow(y_counterfactual_draws), ncol = length(Y1_post), byrow = TRUE)
 
-  # Calculate tau draws dynamically: tau = (Y1_post - y_counterfactual) * bias_correction
-  # bias_correction is 1.0 when use_bias_correction = 0, so this is the naive
-  # difference in that case.
-  #
-  # bias_correction is declared as a scalar `real` in both Stan files, so
-  # rstan::extract() returns it as a 1-D array of length n_draws (with a
-  # `dim` attribute). A 1-D array does not conform to a 2-D matrix under
-  # `*`, so we explicitly broadcast it to an n_draws x n_post matrix and
-  # multiply elementwise. This works regardless of whether the input is a
-  # plain numeric vector or a 1-D array.
-  bc_vec <- as.numeric(bias_correction_draws)  # strip dim attribute
+  bc_vec <- as.numeric(bias_correction_draws)
   bc_mat <- matrix(bc_vec, nrow = nrow(y_counterfactual_draws),
                    ncol = ncol(y_counterfactual_draws), byrow = FALSE)
   tau_draws <- (Y1_mat - y_counterfactual_draws) * bc_mat
@@ -133,7 +167,6 @@
     tau_UB = apply(tau_draws, 2, \(x) stats::quantile(x, 1 - (1 - ci) / 2))
   )
 
-  # Compute y_synth = observed - tau (invert for ribbon: LB/UB swap)
   post_outcome <- post_data |> dplyr::select(!!time, !!outcome)
   post_plot <- dplyr::inner_join(tau_summary, post_outcome,
                                  by = rlang::as_name(time)
@@ -145,15 +178,8 @@
     ) |>
     dplyr::select(!!time, !!outcome, y_synth, LB, UB, tau, tau_LB, tau_UB)
 
-  # --- 2. PRE-TREATMENT PERIOD ---
   pre_times <- pre_data |> dplyr::pull(!!time)
 
-  # Defensive sanity check: y_sim_pre_draws must have one column per real
-  # pre-treatment time period. The model1 covariate-stacking feature in
-  # fit() inflates y_sim_pre with extra rows for predictor matching, which
-  # are stripped before reaching this helper. If the trim wasn't applied
-  # (or the caller passed something inconsistent) we surface a clear error
-  # here rather than letting tibble::tibble() complain about column sizes.
   if (ncol(y_sim_pre_draws) != length(pre_times)) {
     stop(sprintf(
       "y_sim_pre_draws has %d columns but pre_data has %d rows. ",
@@ -181,11 +207,8 @@
     ) |>
     dplyr::select(!!time, !!outcome, y_synth, LB, UB, tau, tau_LB, tau_UB)
 
-  # Combine pre and post data
   dplyr::bind_rows(pre_plot, post_plot)
 }
-
-
 
 
 .makeWide <- function(data, id, time, outcome, treatment) {
@@ -216,45 +239,52 @@
 }
 
 
-
-
 .plot_tau <- function(data, x, y, ymin, ymax, xintercept) {
-  ggplot2::ggplot(data = data, ggplot2::aes(x = !!x)) +
-    ggplot2::geom_line(ggplot2::aes(y = {{ y }})) +
-    ggplot2::geom_ribbon(
-      ggplot2::aes(ymin = {{ ymin }}, ymax = {{ ymax }}),
-      color = "gray",
-      alpha = 0.2
-    ) +
-    ggplot2::theme_bw(base_size = 14) +
-    ggplot2::theme(
-      legend.position = "none",
-      panel.border = ggplot2::element_blank(),
-      axis.line = ggplot2::element_line()
-    ) +
-    ggplot2::geom_vline(xintercept = xintercept, linetype = "dashed")
+  data <- as.data.frame(data)
+
+  # Resolve column names whether passed as symbol/quosure/string
+  resolve <- function(val, quo) {
+    if (rlang::is_quosure(val))            return(rlang::as_name(val))
+    if (is.character(val) && length(val) == 1L) return(val)
+    if (rlang::quo_is_symbol(quo))         return(rlang::as_name(quo))
+    rlang::as_name(quo)
+  }
+  xn    <- resolve(x,    rlang::enquo(x))
+  yn    <- resolve(y,    rlang::enquo(y))
+  yminn <- resolve(ymin, rlang::enquo(ymin))
+  ymaxn <- resolve(ymax, rlang::enquo(ymax))
+
+  xv  <- data[[xn]]
+  yv  <- data[[yn]]
+  lbv <- data[[yminn]]
+  ubv <- data[[ymaxn]]
+
+  ord <- order(xv)
+  xv <- xv[ord]; yv <- yv[ord]; lbv <- lbv[ord]; ubv <- ubv[ord]
+
+  yrng <- range(c(yv, lbv, ubv), na.rm = TRUE)
+
+  op <- graphics::par(no.readonly = TRUE)
+  on.exit(graphics::par(op))
+  graphics::par(bty = "l")
+
+  plot(xv, yv, type = "n", ylim = yrng, xlab = xn, ylab = yn)
+  graphics::grid(lty = "dotted", col = "gray80")
+  graphics::polygon(c(xv, rev(xv)), c(lbv, rev(ubv)),
+                    col = grDevices::adjustcolor("gray", alpha.f = 0.2),
+                    border = NA)
+  graphics::lines(xv, yv, lwd = 2)
+  graphics::abline(v = xintercept, lty = 2)
+  graphics::abline(h = 0, lty = 1, col = "black")
+  invisible(NULL)
 }
 
 
 
-
-# ----------------------------------------------------------------------------
-# Summary infrastructure
-#
-# .nasc_summary_stats() builds the structured summary list from a fitted
-# nascSynth object (called via the public $summary() method, which forwards
-# private state through `parts`). The result is a list with class
-# "summary.nascSynth"; print.summary.nascSynth formats it for the console.
-# ----------------------------------------------------------------------------
-
-# Small null-coalescing operator (avoids a hard dep on rlang's %||%).
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
-# Quantile probabilities from a central credible interval width (e.g. 0.95
-# -> c(0.025, 0.975)).
 .ci_probs <- function(ci) c((1 - ci) / 2, 1 - (1 - ci) / 2)
 
-# Posterior-summary helper: mean, sd, central CrI, and Pr(x > 0).
 .posterior_summary <- function(x, ci) {
   q <- stats::quantile(x, .ci_probs(ci), names = FALSE, na.rm = TRUE)
   c(
@@ -266,8 +296,6 @@
   )
 }
 
-# MCMC diagnostics from the rstan fit. Returns NULL if anything goes wrong
-# (e.g. workers were spawned in subprocesses and last_fit is NULL).
 .mcmc_diagnostics <- function(fit) {
   if (is.null(fit)) return(NULL)
   diag <- tryCatch({
@@ -275,7 +303,6 @@
     keep <- !rownames(s) %in% c("lp__")
     s <- s[keep, , drop = FALSE]
 
-    # Divergence count from sampler params (post-warmup).
     sp <- tryCatch(
       rstan::get_sampler_params(fit, inc_warmup = FALSE),
       error = function(e) NULL
@@ -285,19 +312,39 @@
     } else NA_integer_
 
     list(
+      source     = "single_fit",
       max_rhat   = max(s[, "Rhat"],  na.rm = TRUE),
       min_n_eff  = min(s[, "n_eff"], na.rm = TRUE),
       n_divergent = n_div,
+      n_max_td   = NA_integer_,
       n_chains   = length(fit@stan_args),
       n_iter     = if (length(fit@stan_args)) fit@stan_args[[1]]$iter else NA_integer_,
-      n_warmup   = if (length(fit@stan_args)) fit@stan_args[[1]]$warmup else NA_integer_
+      n_warmup   = if (length(fit@stan_args)) fit@stan_args[[1]]$warmup else NA_integer_,
+      n_workers  = NA_integer_
     )
   }, error = function(e) NULL)
   diag
 }
 
-# Build the summary structure. `parts` is a named list assembled in the
-# public method (private fields are not visible from outside the R6 class).
+.worker_to_diagnostics <- function(wd) {
+  if (is.null(wd)) return(NULL)
+  list(
+    source            = "worker_loop",
+    max_rhat          = wd$max_rhat_observed,
+    converged_share   = wd$converged_share,
+    n_converged       = wd$n_converged,
+    n_finite_rhat     = wd$n_finite_rhat,
+    rhat_threshold    = wd$rhat_threshold,
+    min_n_eff         = wd$min_n_eff,
+    n_divergent       = wd$total_divergent,
+    n_max_td          = wd$total_max_td,
+    n_chains          = wd$n_workers,
+    n_iter            = wd$iter_per_worker,
+    n_warmup          = wd$warmup_per_worker,
+    n_workers         = wd$n_workers
+  )
+}
+
 .nasc_summary_stats <- function(parts) {
 
   ci         <- parts$ci_width
@@ -311,7 +358,6 @@
     stop("Run $fit() before calling summary().")
   }
 
-  # --- 1. Post-treatment tau draws (n_draws x n_post) ---
   post_data <- plot_data |>
     dplyr::filter(!!parts$time >= intervention)
   Y1_post   <- post_data[[outcome_nm]]
@@ -323,11 +369,9 @@
                       byrow = FALSE)
   tau_draws <- (Y1_mat - ycf) * bc_mat
 
-  # --- 2. ATT (average over post-treatment periods, per draw) ---
   att_draws <- rowMeans(tau_draws)
   att <- .posterior_summary(att_draws, ci)
 
-  # --- 3. Per-period tau table ---
   per_period <- tibble::tibble(
     !!time_nm := post_data[[time_nm]],
     mean   = apply(tau_draws, 2, mean),
@@ -337,14 +381,25 @@
     p_pos  = apply(tau_draws, 2, \(x) mean(x > 0))
   )
 
-  # --- 4. Pre-treatment fit (RMSE between observed and posterior-mean y_synth) ---
   pre_data <- plot_data |>
     dplyr::filter(!!parts$time < intervention)
-  pre_rmse <- if (nrow(pre_data) > 0L) {
-    sqrt(mean((pre_data[[outcome_nm]] - pre_data$y_synth)^2))
+  if (nrow(pre_data) > 0L) {
+    pre_resid <- pre_data[[outcome_nm]] - pre_data$y_synth
+    pre_rmse  <- sqrt(mean(pre_resid^2))
+    ss_res <- sum(pre_resid^2)
+    ss_tot <- sum((pre_data[[outcome_nm]] - mean(pre_data[[outcome_nm]]))^2)
+    pre_r2 <- if (ss_tot > 0) 1 - ss_res / ss_tot else NA_real_
+  } else {
+    pre_rmse <- NA_real_
+    pre_r2   <- NA_real_
+  }
+
+  post_resid <- post_data[[outcome_nm]] - post_data$y_synth
+  post_rmse  <- if (length(post_resid)) sqrt(mean(post_resid^2)) else NA_real_
+  rmspe_ratio <- if (!is.na(pre_rmse) && !is.na(post_rmse) && pre_rmse > 0) {
+    post_rmse / pre_rmse
   } else NA_real_
 
-  # --- 5. Donor weights (n_draws x n_donors -> per-donor summaries) ---
   w_mat <- draws$w
   treated_id  <- as.character(parts$treated_ids)
   all_ids     <- levels(parts$id_levels)
@@ -361,15 +416,11 @@
   ) |>
     dplyr::arrange(dplyr::desc(mean))
 
-  # Effective number of donors via exp(entropy) of the posterior-mean weight
-  # vector (a soft sparsity measure: equals K under uniform weights, 1 under
-  # a one-hot weight).
   w_mean <- weight_tbl$mean
-  w_mean <- w_mean / sum(w_mean)  # guard against tiny numerical drift
+  w_mean <- w_mean / sum(w_mean)
   entropy <- -sum(ifelse(w_mean > 0, w_mean * log(w_mean), 0))
   eff_donors <- exp(entropy)
 
-  # --- 6. Other model parameters ---
   param_rows <- list()
   sigma_draws <- draws$sigma %||% draws$sigma_sc
   if (!is.null(sigma_draws)) {
@@ -389,12 +440,14 @@
     tibble::as_tibble(do.call(rbind, param_rows), rownames = "parameter")
   } else NULL
 
-  # --- 7. MCMC diagnostics ---
-  diag <- .mcmc_diagnostics(parts$fitted)
+  diag <- if (!is.null(draws$worker_diagnostics)) {
+    .worker_to_diagnostics(draws$worker_diagnostics)
+  } else {
+    .mcmc_diagnostics(parts$fitted)
+  }
 
   out <- list(
     header = list(
-      engine          = if (parts$nasc_penalty) "stan_2_NASC" else "model1",
       spatial_model   = parts$spatial_model,
       bias_correction = parts$bias_correction,
       nasc_penalty    = parts$nasc_penalty,
@@ -409,62 +462,45 @@
       outcome         = outcome_nm,
       time            = time_nm
     ),
-    att        = att,
-    per_period = per_period,
-    pre_rmse   = pre_rmse,
-    weights    = weight_tbl,
-    eff_donors = eff_donors,
-    parameters = param_tbl,
-    mcmc       = diag
+    att         = att,
+    per_period  = per_period,
+    pre_rmse    = pre_rmse,
+    pre_r2      = pre_r2,
+    post_rmse   = post_rmse,
+    rmspe_ratio = rmspe_ratio,
+    weights     = weight_tbl,
+    eff_donors  = eff_donors,
+    parameters  = param_tbl,
+    mcmc        = diag
   )
   class(out) <- c("summary.nascSynth", "list")
   out
 }
 
-# S3 print method for the summary object. Plain base-R formatting; no extra
-# package dependencies.
 #' @export
 print.summary.nascSynth <- function(x, digits = 3, max_donors = 10, ...) {
   h <- x$header
-  bar <- strrep("=", 72)
-  rule <- strrep("-", 72)
-
-  cat(bar, "\n", sep = "")
-  cat("Bayesian Network-Aware Synthetic Control\n")
-  cat(bar, "\n", sep = "")
-  cat(sprintf("  Engine          : %s\n", h$engine))
-  cat(sprintf("  Spatial model   : %s\n", h$spatial_model))
-  cat(sprintf("  NASC penalty    : %s\n", h$nasc_penalty))
-  cat(sprintf("  Bias correction : %s\n", h$bias_correction))
-  cat(sprintf("  Rho source      : %s\n", h$rho_source))
+  cat("Network-Aware Synthetic Control\n")
+  cat("\n")
   cat(sprintf("  Outcome         : %s\n", h$outcome))
   cat(sprintf("  Treated unit    : %s\n", h$treated_unit))
-  cat(sprintf("  Intervention at : %s = %s\n", h$time, format(h$intervention)))
-  cat(sprintf("  Periods         : %d pre / %d post\n", h$n_pre, h$n_post))
-  cat(sprintf("  Donors          : %d\n", h$n_donors))
-  cat(sprintf("  Posterior draws : %d\n", h$n_draws))
+  cat(sprintf("  J               : %d\n", h$n_donors))
+  cat(sprintf("  T_0             : %d\n", h$n_pre))
+  cat(sprintf("  T               : %d\n", h$n_post))
+  cat(sprintf("  Spatial model   : %s\n", h$spatial_model))
+  cat(sprintf("  Bias correction : %s\n", h$bias_correction))
+  cat(sprintf("  NASC penalty    : %s\n", h$nasc_penalty))
+  cat(sprintf("  Rho source      : %s\n", h$rho_source))
+  cat(sprintf("  Posterior draws : %d (post-warmup, all chains pooled)\n", h$n_draws))
   cat(sprintf("  Credible level  : %.0f%%\n", 100 * h$ci_width))
-  cat(rule, "\n", sep = "")
+  cat("\n")
 
-  # ---- ATT ----
-  ci_lo <- 100 * (1 - h$ci_width) / 2
-  ci_hi <- 100 - ci_lo
-  att_dir   <- if (x$att["mean"] >= 0) ">" else "<"
-  att_p_dir <- if (x$att["mean"] >= 0) x$att["p_pos"] else 1 - x$att["p_pos"]
-  cat("Average treatment effect on the treated (ATT)\n")
-  cat(sprintf("  Posterior mean   : %s\n",  formatC(x$att["mean"], digits = digits, format = "f")))
-  cat(sprintf("  Posterior SD     : %s\n",  formatC(x$att["sd"],   digits = digits, format = "f")))
-  cat(sprintf("  %.1f%% CrI         : [%s, %s]\n",
-              100 * h$ci_width,
-              formatC(x$att["lower"], digits = digits, format = "f"),
-              formatC(x$att["upper"], digits = digits, format = "f")))
-  cat(sprintf("  Pr(ATT %s 0)      : %s\n",
-              att_dir,
-              formatC(att_p_dir, digits = max(digits, 3), format = "f")))
-  cat(rule, "\n", sep = "")
+  ci_pct <- 100 * h$ci_width
+  ci_lo <- sprintf("l-%g%% CrI", ci_pct)
+  ci_hi <- sprintf("u-%g%% CrI", ci_pct)
 
-  # ---- Per-period tau ----
-  cat("Per-period treatment effect (tau)\n")
+  # Per-period TE
+  cat("Per-period TE\n")
   pp <- x$per_period
   pp_print <- data.frame(
     period = format(pp[[h$time]]),
@@ -476,19 +512,73 @@ print.summary.nascSynth <- function(x, digits = 3, max_donors = 10, ...) {
     check.names = FALSE,
     stringsAsFactors = FALSE
   )
-  names(pp_print)[1] <- h$time
-  names(pp_print)[4] <- sprintf("%.1f%%", ci_lo)
-  names(pp_print)[5] <- sprintf("%.1f%%", ci_hi)
+  names(pp_print)[1] <- "Period"
+  names(pp_print)[2] <- "Estimate"
+  names(pp_print)[3] <- "Est.Error"
+  names(pp_print)[4] <- ci_lo
+  names(pp_print)[5] <- ci_hi
   print(pp_print, row.names = FALSE, right = TRUE)
-  cat(rule, "\n", sep = "")
+  cat("\n")
 
-  # ---- Pre-treatment fit ----
+  # ATT
+  att <- x$att
+  att_p_dir <- if (att["mean"] >= 0) att["p_pos"] else 1 - att["p_pos"]
+  cat("ATT\n")
+  att_print <- data.frame(
+    blank   = "",
+    mean    = formatC(att["mean"],  digits = digits, format = "f"),
+    sd      = formatC(att["sd"],    digits = digits, format = "f"),
+    lower   = formatC(att["lower"], digits = digits, format = "f"),
+    upper   = formatC(att["upper"], digits = digits, format = "f"),
+    `Pr>0`  = formatC(att_p_dir,    digits = max(digits, 3), format = "f"),
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+  names(att_print)[1] <- ""
+  names(att_print)[2] <- "Estimate"
+  names(att_print)[3] <- "Est.Error"
+  names(att_print)[4] <- ci_lo
+  names(att_print)[5] <- ci_hi
+  print(att_print, row.names = FALSE, right = TRUE)
+  cat("\n")
+
+  # Model parameters
+  if (!is.null(x$parameters) && nrow(x$parameters) > 0) {
+    cat("Estimated model parameters\n")
+    p <- x$parameters
+    p_print <- data.frame(
+      parameter = p$parameter,
+      mean      = formatC(p$mean,  digits = digits, format = "f"),
+      sd        = formatC(p$sd,    digits = digits, format = "f"),
+      lower     = formatC(p$lower, digits = digits, format = "f"),
+      upper     = formatC(p$upper, digits = digits, format = "f"),
+      stringsAsFactors = FALSE
+    )
+    names(p_print)[1] <- "Parameter"
+    names(p_print)[2] <- "Estimate"
+    names(p_print)[3] <- "Est.Error"
+    names(p_print)[4] <- ci_lo
+    names(p_print)[5] <- ci_hi
+    print(p_print, row.names = FALSE, right = TRUE)
+    cat("\n")
+  }
+
+  # Pre-treatment fit
   cat("Pre-treatment fit\n")
-  cat(sprintf("  RMSE (observed vs synthetic) : %s\n",
+  cat(sprintf("  Pre-period R^2    : %s\n",
+              if (is.na(x$pre_r2)) "NA"
+              else formatC(x$pre_r2, digits = digits, format = "f")))
+  cat(sprintf("  Pre-period RMSE   : %s\n",
               formatC(x$pre_rmse, digits = digits, format = "f")))
-  cat(rule, "\n", sep = "")
+  cat(sprintf("  Post-period RMSPE : %s\n",
+              if (is.na(x$post_rmse)) "NA"
+              else formatC(x$post_rmse, digits = digits, format = "f")))
+  cat(sprintf("  RMSPE ratio       : %s\n",
+              if (is.na(x$rmspe_ratio)) "NA"
+              else formatC(x$rmspe_ratio, digits = digits, format = "f")))
+  cat("\n")
 
-  # ---- Donor weights ----
+  # Donor weights
   cat(sprintf("Donor weights (top %d by posterior mean)\n",
               min(max_donors, nrow(x$weights))))
   w <- utils::head(x$weights, max_donors)
@@ -500,65 +590,75 @@ print.summary.nascSynth <- function(x, digits = 3, max_donors = 10, ...) {
     upper = formatC(w$upper, digits = digits, format = "f"),
     stringsAsFactors = FALSE
   )
-  names(w_print)[4] <- sprintf("%.1f%%", ci_lo)
-  names(w_print)[5] <- sprintf("%.1f%%", ci_hi)
+  names(w_print)[1] <- "Donor"
+  names(w_print)[2] <- "Estimate"
+  names(w_print)[3] <- "Est.Error"
+  names(w_print)[4] <- ci_lo
+  names(w_print)[5] <- ci_hi
   print(w_print, row.names = FALSE, right = TRUE)
-  cat(sprintf("  Effective # of donors (exp-entropy) : %s\n",
-              formatC(x$eff_donors, digits = digits, format = "f")))
   if (nrow(x$weights) > max_donors) {
     cat(sprintf("  ... %d more donors not shown\n",
                 nrow(x$weights) - max_donors))
   }
-  cat(rule, "\n", sep = "")
+  cat("\n")
 
-  # ---- Other parameters ----
-  if (!is.null(x$parameters) && nrow(x$parameters) > 0) {
-    cat("Other model parameters\n")
-    p <- x$parameters
-    p_print <- data.frame(
-      parameter = p$parameter,
-      mean      = formatC(p$mean,  digits = digits, format = "f"),
-      sd        = formatC(p$sd,    digits = digits, format = "f"),
-      lower     = formatC(p$lower, digits = digits, format = "f"),
-      upper     = formatC(p$upper, digits = digits, format = "f"),
-      stringsAsFactors = FALSE
-    )
-    names(p_print)[4] <- sprintf("%.1f%%", ci_lo)
-    names(p_print)[5] <- sprintf("%.1f%%", ci_hi)
-    print(p_print, row.names = FALSE, right = TRUE)
-    cat(rule, "\n", sep = "")
-  }
-
-  # ---- MCMC diagnostics ----
+  # MCMC diagnostics
   cat("MCMC diagnostics\n")
   if (is.null(x$mcmc)) {
     cat("  (not available -- workers ran in subprocesses or fit not retained)\n")
   } else {
     m <- x$mcmc
-    cat(sprintf("  Chains / iter / warmup : %s / %s / %s\n",
-                m$n_chains, m$n_iter, m$n_warmup))
-    cat(sprintf("  Max Rhat               : %s\n",
-                formatC(m$max_rhat, digits = 3, format = "f")))
-    cat(sprintf("  Min n_eff              : %s\n",
-                formatC(m$min_n_eff, digits = 0, format = "f")))
-    cat(sprintf("  Divergent transitions  : %s\n",
-                if (is.na(m$n_divergent)) "NA" else as.character(m$n_divergent)))
-    # Quick warnings
+    src <- m$source %||% "single_fit"
+    if (identical(src, "worker_loop")) {
+      cat(sprintf("  Source                : per-worker (%d workers, 1 chain each)\n",
+                  m$n_workers))
+      cat(sprintf("  Iter / warmup (each)  : %s / %s\n",
+                  m$n_iter, m$n_warmup))
+      cat(sprintf("  Converged chains      : %d / %d (%.1f%%) at split-Rhat <= %s\n",
+                  m$n_converged %||% NA_integer_,
+                  m$n_finite_rhat %||% NA_integer_,
+                  100 * (m$converged_share %||% NA_real_),
+                  formatC(m$rhat_threshold %||% 1.05, digits = 2, format = "f")))
+      cat(sprintf("  Worst split-Rhat      : %s\n",
+                  formatC(m$max_rhat, digits = 3, format = "f")))
+      cat(sprintf("  Min n_eff (worst)     : %s\n",
+                  formatC(m$min_n_eff, digits = 0, format = "f")))
+      cat(sprintf("  Divergent (total)     : %s\n",
+                  if (is.na(m$n_divergent)) "NA" else as.character(m$n_divergent)))
+      cat(sprintf("  Max-treedepth (total) : %s\n",
+                  if (is.na(m$n_max_td)) "NA" else as.character(m$n_max_td)))
+    } else {
+      cat(sprintf("  Chains / iter / warmup : %s / %s / %s\n",
+                  m$n_chains, m$n_iter, m$n_warmup))
+      cat(sprintf("  Max Rhat               : %s\n",
+                  formatC(m$max_rhat, digits = 3, format = "f")))
+      cat(sprintf("  Min n_eff              : %s\n",
+                  formatC(m$min_n_eff, digits = 0, format = "f")))
+      cat(sprintf("  Divergent transitions  : %s\n",
+                  if (is.na(m$n_divergent)) "NA" else as.character(m$n_divergent)))
+    }
+    if (identical(src, "worker_loop") && !is.na(m$converged_share) &&
+        m$converged_share < 1) {
+      cat(sprintf(
+        "  ! Only %.1f%% of workers converged (split-Rhat <= %s); the\n",
+        100 * m$converged_share,
+        formatC(m$rhat_threshold, digits = 2, format = "f")
+      ))
+      cat("    rho ensemble may include poorly-mixed chains.\n")
+    }
     if (!is.na(m$max_rhat) && m$max_rhat > 1.05) {
       cat("  ! Rhat > 1.05 suggests convergence problems.\n")
     }
     if (!is.na(m$n_divergent) && m$n_divergent > 0) {
       cat("  ! Divergent transitions detected; consider raising adapt_delta.\n")
     }
+    if (!is.na(m$n_max_td) && m$n_max_td > 0) {
+      cat("  ! Max treedepth saturated; consider raising max_treedepth.\n")
+    }
   }
-  cat(bar, "\n", sep = "")
   invisible(x)
 }
 
-# S3 method dispatch for summary() on nascSynth R6 objects. This calls back
-# into the R6 method so the implementation stays in one place. Returns
-# invisibly because the R6 method already prints by default; otherwise the
-# REPL would auto-print the returned list a second time.
 #' @export
 summary.nascSynth <- function(object, ...) {
   invisible(object$summary(...))

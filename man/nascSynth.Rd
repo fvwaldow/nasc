@@ -5,18 +5,44 @@
 \title{Bayesian Network-Aware Synthetic Control}
 \description{
 An R6 class implementing Bayesian Synthetic Control estimators with optional
-network/spatial awareness. Supports predictor matching, covariate adjustment,
-and SAR/SDM spatial models via Stan.
+network/spatial awareness.
+
+Three orthogonal options govern how the spatial structure enters the
+estimator:
+
+\itemize{
+\item \code{spatial_model}: \code{"none"}, \code{"SAR"}, \code{"SDM"}, or
+\code{"exogenous"}. The first three behave as before; the last skips
+Step 1 and uses a user-supplied scalar \code{rho}.
+\item \code{rho}: optional numeric in \code{(-1, 1)}. When provided,
+Step 1 is skipped regardless of \code{spatial_model} and the supplied
+value is used directly.
+\item \code{bias_correction} (logical): whether the post-treatment effect
+is rescaled by \eqn{1/(1 - w's)}.
+\item \code{nasc_penalty} (logical): whether the NASC penalty
+\eqn{-\lambda \langle w, |s| \rangle} enters the likelihood.
+}
+
+Model dispatch (single source of truth):
+\itemize{
+\item \code{nasc_penalty = TRUE}  -> stan_2_NASC.stan (penalty always on
+in this file, bias_correction toggleable).
+\item \code{nasc_penalty = FALSE} -> model1.stan (no penalty; bias
+correction toggleable through the same generated-quantities mechanism).
+}
+
+Step 1 (SAR or SDM rho estimation) runs only when (i) the chosen Step 2
+configuration uses a non-trivial rho (penalty on, or bias correction on)
+AND (ii) no exogenous rho was supplied.
 }
 \section{Active bindings}{
 \if{html}{\out{<div class="r6-active-bindings">}}
 \describe{
-\item{\code{timeTiles}}{ggplot2 tile chart of treatment status over time.}
-\item{\code{plotData}}{Tibble with observed and counterfactual outcomes.}
-\item{\code{interventionTime}}{The first treatment period.}
-\item{\code{synthetic}}{ggplot2 plot of observed vs synthetic outcomes.}
-\item{\code{checks}}{MCMC diagnostics from the fitted Stan model.}
-\item{\code{lift}}{Lift draws (if computed).}
+\item{\code{plotData}}{Tibble with observed and counterfactual outcomes}
+
+\item{\code{interventionTime}}{The first treatment period}
+
+\item{\code{synthetic}}{Base R plot of observed vs synthetic outcomes}
 }
 \if{html}{\out{</div>}}
 }
@@ -26,94 +52,216 @@ and SAR/SDM spatial models via Stan.
 \item \href{#method-nascSynth-new}{\code{nascSynth$new()}}
 \item \href{#method-nascSynth-fit}{\code{nascSynth$fit()}}
 \item \href{#method-nascSynth-updateWidth}{\code{nascSynth$updateWidth()}}
+\item \href{#method-nascSynth-summary}{\code{nascSynth$summary()}}
 \item \href{#method-nascSynth-effectPlot}{\code{nascSynth$effectPlot()}}
-\item \href{#method-nascSynth-summarizeLift}{\code{nascSynth$summarizeLift()}}
+\item \href{#method-nascSynth-posteriorPlot}{\code{nascSynth$posteriorPlot()}}
+\item \href{#method-nascSynth-tauPosteriorPlot}{\code{nascSynth$tauPosteriorPlot()}}
+\item \href{#method-nascSynth-weightDraws}{\code{nascSynth$weightDraws()}}
+\item \href{#method-nascSynth-weightCorr}{\code{nascSynth$weightCorr()}}
+\item \href{#method-nascSynth-clone}{\code{nascSynth$clone()}}
 }
 }
 \if{html}{\out{<hr>}}
 \if{html}{\out{<a id="method-nascSynth-new"></a>}}
+\if{latex}{\out{\hypertarget{method-nascSynth-new}{}}}
 \subsection{Method \code{new()}}{
 Create a new nascSynth object.
 \subsection{Usage}{
 \if{html}{\out{<div class="r">}}\preformatted{nascSynth$new(
-  data, time, id, treated, outcome,
+  data,
+  time,
+  id,
+  treated,
+  outcome,
   ci_width = 0.75,
-  covariates = NULL, vs = NULL,
-  W = NULL, spatial_model = "none"
+  covariates = NULL,
+  W = NULL,
+  spatial_model = "none",
+  rho = NULL,
+  bias_correction = NULL,
+  nasc_penalty = NULL
 )}\if{html}{\out{</div>}}
 }
+
 \subsection{Arguments}{
 \if{html}{\out{<div class="arguments">}}
 \describe{
-\item{\code{data}}{Long-format data frame with one row per unit per time period.}
-\item{\code{time}}{Unquoted name of the time column.}
-\item{\code{id}}{Unquoted name of the unit identifier column.}
-\item{\code{treated}}{Unquoted name of the binary treatment indicator (1/0).}
-\item{\code{outcome}}{Unquoted name of the outcome column.}
-\item{\code{ci_width}}{Credible interval width between 0 and 1. Default 0.75.}
-\item{\code{covariates}}{Optional long-format data frame of time-varying
-covariates (same \code{time} and \code{id} columns as \code{data}).
-Pre-treatment means are appended as extra matching predictors.}
-\item{\code{vs}}{Optional numeric vector of predictor importance weights.}
-\item{\code{W}}{Optional spatial weights matrix with row/column names matching
-unit IDs. Required for SAR/SDM models.}
-\item{\code{spatial_model}}{One of \code{"none"} (default), \code{"SAR"}, or \code{"SDM"}.}
+\item{\code{spatial_model}}{One of \code{"none"}, \code{"SAR"}, \code{"SDM"},
+or \code{"exogenous"}.}
+
+\item{\code{rho}}{Optional scalar in \code{(-1, 1)}. When supplied, Step 1 is
+skipped and this value is used in Step 2 regardless of
+\code{spatial_model}. Required when \code{spatial_model = "exogenous"}.}
+
+\item{\code{bias_correction}}{Logical. If \code{TRUE}, the post-treatment
+counterfactual is rescaled by \eqn{1/(1 - w's)}. Default is \code{TRUE}
+for SAR/SDM/exogenous and \code{FALSE} for \code{spatial_model = "none"}.}
+
+\item{\code{nasc_penalty}}{Logical. If \code{TRUE}, the NASC penalty
+\eqn{-\lambda \langle w, |s| \rangle} enters the likelihood. Same
+model-aware default as \code{bias_correction}.}
 }
 \if{html}{\out{</div>}}
 }
 }
 \if{html}{\out{<hr>}}
 \if{html}{\out{<a id="method-nascSynth-fit"></a>}}
+\if{latex}{\out{\hypertarget{method-nascSynth-fit}{}}}
 \subsection{Method \code{fit()}}{
 Fit the Stan model via MCMC.
 \subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{nascSynth$fit(...)}\if{html}{\out{</div>}}
+\if{html}{\out{<div class="r">}}\preformatted{nascSynth$fit(
+  n_samples = 100,
+  cores = parallel::detectCores() - 1,
+  worker_iter = 2000L,
+  worker_warmup = 1000L,
+  ...
+)}\if{html}{\out{</div>}}
 }
+
 \subsection{Arguments}{
 \if{html}{\out{<div class="arguments">}}
 \describe{
-\item{\code{...}}{Additional arguments passed to \code{\link[rstan:sampling]{rstan::sampling()}}.}
+\item{\code{n_samples}}{Number of rho draws to propagate to Step 2 when Step 1
+runs (default 100). Ignored when an exogenous rho was supplied or when
+no rho is in use.}
+
+\item{\code{cores}}{Number of CPU cores for parallel execution.}
+
+\item{\code{worker_iter}}{Iterations per worker chain in the multi-rho parallel
+loop. Default 2000. Increase if Stan reports low Bulk/Tail ESS.}
+
+\item{\code{worker_warmup}}{Warmup per worker chain in the multi-rho parallel
+loop. Default 1000.}
+
+\item{\code{...}}{Additional arguments forwarded to \code{\link[rstan:stanmodel-method-sampling]{rstan::sampling()}}.}
 }
 \if{html}{\out{</div>}}
 }
 }
 \if{html}{\out{<hr>}}
 \if{html}{\out{<a id="method-nascSynth-updateWidth"></a>}}
+\if{latex}{\out{\hypertarget{method-nascSynth-updateWidth}{}}}
 \subsection{Method \code{updateWidth()}}{
 Update the credible interval width and recompute plot data.
 \subsection{Usage}{
 \if{html}{\out{<div class="r">}}\preformatted{nascSynth$updateWidth(ci_width = 0.75)}\if{html}{\out{</div>}}
 }
+
+}
+\if{html}{\out{<hr>}}
+\if{html}{\out{<a id="method-nascSynth-summary"></a>}}
+\if{latex}{\out{\hypertarget{method-nascSynth-summary}{}}}
+\subsection{Method \code{summary()}}{
+Posterior summary of the fit: ATT, per-period treatment effects,
+donor weights, model parameters and MCMC diagnostics. Prints a
+formatted summary and invisibly returns a \code{summary.nascSynth}
+list. Also dispatched from \code{summary(obj)} via the S3 method
+\code{summary.nascSynth}.
+\subsection{Usage}{
+\if{html}{\out{<div class="r">}}\preformatted{nascSynth$summary(ci_width = NULL, print = TRUE)}\if{html}{\out{</div>}}
+}
+
 \subsection{Arguments}{
 \if{html}{\out{<div class="arguments">}}
 \describe{
-\item{\code{ci_width}}{New width between 0 and 1.}
+\item{\code{ci_width}}{Optional override for the credible interval width.}
+
+\item{\code{print}}{Logical; if \code{TRUE} (default), print the formatted
+summary to the console. Set to \code{FALSE} to retrieve the
+structured list silently for programmatic use.}
 }
 \if{html}{\out{</div>}}
 }
 }
 \if{html}{\out{<hr>}}
 \if{html}{\out{<a id="method-nascSynth-effectPlot"></a>}}
+\if{latex}{\out{\hypertarget{method-nascSynth-effectPlot}{}}}
 \subsection{Method \code{effectPlot()}}{
 Plot the estimated treatment effect (tau) over time.
 \subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{nascSynth$effectPlot(facet = TRUE, subset = NULL)}\if{html}{\out{</div>}}
+\if{html}{\out{<div class="r">}}\preformatted{nascSynth$effectPlot()}\if{html}{\out{</div>}}
 }
+
+}
+\if{html}{\out{<hr>}}
+\if{html}{\out{<a id="method-nascSynth-posteriorPlot"></a>}}
+\if{latex}{\out{\hypertarget{method-nascSynth-posteriorPlot}{}}}
+\subsection{Method \code{posteriorPlot()}}{
+Posterior density plots of the main scalar Bayesian parameters
+(e.g. \code{rho}, \code{sigma}). One panel per parameter; vertical
+lines show the posterior mean and the credible-interval bounds.
+\subsection{Usage}{
+\if{html}{\out{<div class="r">}}\preformatted{nascSynth$posteriorPlot(pars = NULL, ci = NULL)}\if{html}{\out{</div>}}
+}
+
 \subsection{Arguments}{
 \if{html}{\out{<div class="arguments">}}
 \describe{
-\item{\code{facet}}{Logical; facet by unit.}
-\item{\code{subset}}{Optional character vector of unit IDs.}
+\item{\code{pars}}{Optional character vector of parameter names to plot.
+Defaults to all scalar parameters available in the stanfit object,
+excluding \code{lp__} and high-dimensional vectors like \code{w}.}
+
+\item{\code{ci}}{Credible interval width (default uses the object's setting).}
 }
 \if{html}{\out{</div>}}
 }
 }
 \if{html}{\out{<hr>}}
-\if{html}{\out{<a id="method-nascSynth-summarizeLift"></a>}}
-\subsection{Method \code{summarizeLift()}}{
-Summarise the posterior lift.
+\if{html}{\out{<a id="method-nascSynth-tauPosteriorPlot"></a>}}
+\if{latex}{\out{\hypertarget{method-nascSynth-tauPosteriorPlot}{}}}
+\subsection{Method \code{tauPosteriorPlot()}}{
+Posterior density plots of the period-by-period treatment effects
+(\code{tau_t}) for all post-treatment periods, plus the ATT.
+Each post-period density is drawn as a stacked, color-filled curve
+(ridge-style); the ATT is shown in a separate panel below.
 \subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{nascSynth$summarizeLift()}\if{html}{\out{</div>}}
+\if{html}{\out{<div class="r">}}\preformatted{nascSynth$tauPosteriorPlot(ci = NULL)}\if{html}{\out{</div>}}
+}
+
+\subsection{Arguments}{
+\if{html}{\out{<div class="arguments">}}
+\describe{
+\item{\code{ci}}{Credible interval width (default uses the object's setting).}
+}
+\if{html}{\out{</div>}}
+}
+}
+\if{html}{\out{<hr>}}
+\if{html}{\out{<a id="method-nascSynth-weightDraws"></a>}}
+\if{latex}{\out{\hypertarget{method-nascSynth-weightDraws}{}}}
+\subsection{Method \code{weightDraws()}}{
+Plot implicit weight distribution across draws.
+\subsection{Usage}{
+\if{html}{\out{<div class="r">}}\preformatted{nascSynth$weightDraws()}\if{html}{\out{</div>}}
+}
+
+}
+\if{html}{\out{<hr>}}
+\if{html}{\out{<a id="method-nascSynth-weightCorr"></a>}}
+\if{latex}{\out{\hypertarget{method-nascSynth-weightCorr}{}}}
+\subsection{Method \code{weightCorr()}}{
+Plot correlations between weights across draws.
+\subsection{Usage}{
+\if{html}{\out{<div class="r">}}\preformatted{nascSynth$weightCorr()}\if{html}{\out{</div>}}
+}
+
+}
+\if{html}{\out{<hr>}}
+\if{html}{\out{<a id="method-nascSynth-clone"></a>}}
+\if{latex}{\out{\hypertarget{method-nascSynth-clone}{}}}
+\subsection{Method \code{clone()}}{
+The objects of this class are cloneable with this method.
+\subsection{Usage}{
+\if{html}{\out{<div class="r">}}\preformatted{nascSynth$clone(deep = FALSE)}\if{html}{\out{</div>}}
+}
+
+\subsection{Arguments}{
+\if{html}{\out{<div class="arguments">}}
+\describe{
+\item{\code{deep}}{Whether to make a deep clone.}
+}
+\if{html}{\out{</div>}}
 }
 }
 }

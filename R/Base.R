@@ -57,46 +57,54 @@ nascSynth <- R6::R6Class(
     stan_model = NULL,
     y_synth_draws = NULL,
     treated_ids = NULL,
-    # Internal flags:
-    #   uses_rho   - TRUE iff penalty or bias correction is active. Determines
-    #                whether s (and therefore rho/W/w_J1) is needed at all.
-    #   uses_step1 - TRUE iff Step 1 (SAR or SDM) must be fitted.
     uses_rho   = NULL,
     uses_step1 = NULL
   ),
   active = list(
-    #' @field plotData Tibble with observed and counterfactual outcomes.
+    #' @field plotData Tibble with observed and counterfactual outcomes
     plotData = function() { return(private$plot_data) },
 
-    #' @field interventionTime The first treatment period.
+    #' @field interventionTime The first treatment period
     interventionTime = function() { return(private$intervention) },
 
-    #' @field synthetic ggplot2 plot of observed vs synthetic outcomes.
+    #' @field synthetic Base R plot of observed vs synthetic outcomes
     synthetic = function() {
-      df_plot <- private$plot_data |>
-        dplyr::rename(Observed = !!private$outcome, Synthetic = y_synth) |>
-        dplyr::select(!!private$time, Observed, Synthetic, LB, UB) |>
-        tidyr::pivot_longer(cols = c(Observed, Synthetic))
+      df <- as.data.frame(private$plot_data)
+      time_name    <- rlang::as_name(private$time)
+      outcome_name <- rlang::as_name(private$outcome)
 
-      ggplot2::ggplot(data = df_plot, ggplot2::aes(x = !!private$time)) +
-        ggplot2::geom_line(ggplot2::aes(y = value, linetype = name)) +
-        ggplot2::geom_ribbon(
-          ggplot2::aes(ymin = LB, ymax = UB),
-          color = "gray", alpha = 0.2
-        ) +
-        ggplot2::theme_bw(base_size = 14) +
-        ggplot2::theme(
-          legend.title   = ggplot2::element_blank(),
-          legend.position = c(0.9, .1),
-          legend.background = ggplot2::element_rect(
-            fill = ggplot2::alpha("white", 0)
-          ),
-          panel.border = ggplot2::element_blank(),
-          axis.line    = ggplot2::element_line()
-        ) +
-        ggplot2::geom_vline(
-          xintercept = private$intervention, linetype = "dashed"
-        )
+      x   <- df[[time_name]]
+      obs <- df[[outcome_name]]
+      syn <- df$y_synth
+      lb  <- df$LB
+      ub  <- df$UB
+
+      ord <- order(x)
+      x <- x[ord]; obs <- obs[ord]; syn <- syn[ord]
+      lb <- lb[ord]; ub <- ub[ord]
+
+      yrng <- range(c(obs, syn, lb, ub), na.rm = TRUE)
+
+      op <- graphics::par(no.readonly = TRUE)
+      on.exit(graphics::par(op))
+      graphics::par(bty = "l", mar = c(6, 4, 2, 1))
+      graphics::par(bty = "l")
+
+      plot(x, obs, type = "n", ylim = yrng,
+           xlab = time_name, ylab = outcome_name)
+      graphics::grid(lty = "dotted", col = "gray80")
+      graphics::polygon(c(x, rev(x)), c(lb, rev(ub)),
+                        col = grDevices::adjustcolor("gray", alpha.f = 0.2),
+                        border = NA)
+      graphics::lines(x, obs, lty = 1, lwd = 2)
+      graphics::lines(x, syn, lty = 2, lwd = 2)
+      graphics::abline(v = private$intervention, lty = 3)
+  graphics::legend("bottom",
+                       inset  = c(0, -0.28),
+                       legend = c("Observed", "Synthetic"),
+                       lty    = c(1, 2), lwd = 2, bty = "n",
+                       horiz  = TRUE, xpd = TRUE)
+      invisible(NULL)
     }
   ),
   public = list(
@@ -128,7 +136,6 @@ nascSynth <- R6::R6Class(
         stop("spatial_model must be 'none', 'SAR', 'SDM', or 'exogenous'.")
       }
 
-      # Model-aware defaults preserve legacy behaviour for plain `none` calls.
       if (is.null(bias_correction)) {
         bias_correction <- spatial_model %in% c("SAR", "SDM", "exogenous")
       }
@@ -143,7 +150,6 @@ nascSynth <- R6::R6Class(
         stop("'nasc_penalty' must be a single logical (TRUE/FALSE).")
       }
 
-      # Validate exogenous rho when supplied
       if (!is.null(rho)) {
         if (!is.numeric(rho) || length(rho) != 1L || is.na(rho)) {
           stop("'rho' must be a single numeric value.")
@@ -157,10 +163,8 @@ nascSynth <- R6::R6Class(
         stop("spatial_model = 'exogenous' requires a user-supplied 'rho'.")
       }
 
-      # Does any spatial element of the estimator activate?
       uses_rho <- bias_correction || nasc_penalty
 
-      # Need W whenever rho is in use. Don't need W otherwise.
       if (uses_rho && is.null(W)) {
         stop(
           "A spatial weights matrix 'W' is required whenever ",
@@ -168,8 +172,6 @@ nascSynth <- R6::R6Class(
         )
       }
 
-      # When rho is in use under spatial_model = "none", the user must supply
-      # an exogenous rho (no Step 1 model to fit).
       if (uses_rho && spatial_model == "none" && is.null(rho)) {
         stop(
           "spatial_model = 'none' with bias_correction = TRUE or ",
@@ -199,23 +201,20 @@ nascSynth <- R6::R6Class(
       private$nasc_penalty    <- nasc_penalty
       private$uses_rho        <- uses_rho
 
-      # Step 1 runs only if rho is needed AND the user did not supply one.
       private$uses_step1 <- uses_rho &&
         spatial_model %in% c("SAR", "SDM") &&
         is.null(rho)
 
-      # ---- Status message ----
-      engine <- if (nasc_penalty) "stan_2_NASC" else "model1"
       rho_src <- if (!uses_rho) {
-        "n/a (no rho in use)"
+        "NA"
       } else if (!is.null(rho)) {
-        sprintf("exogenous (rho = %.4f)", rho)
+        "exogenous"
       } else {
-        sprintf("Step 1 %s posterior", spatial_model)
+        "posterior distribution"
       }
       message(sprintf(
-        "nascSynth: engine = %s | nasc_penalty = %s | bias_correction = %s | rho source = %s",
-        engine, nasc_penalty, bias_correction, rho_src
+        "nascSynth: bias correction = %s, nasc penalty = %s, rho source = %s",
+        bias_correction, nasc_penalty, rho_src
       ))
 
       if (!setequal(
@@ -261,7 +260,6 @@ nascSynth <- R6::R6Class(
         ) |>
         dplyr::pull(!!private$time)
 
-      # Stan model dispatch
       private$stan_model <- list(
         step1 = if (private$uses_step1) {
           switch(
@@ -283,7 +281,12 @@ nascSynth <- R6::R6Class(
     #'   no rho is in use.
     #' @param cores Number of CPU cores for parallel execution.
     #' @param ... Additional arguments forwarded to [rstan::sampling()].
-    fit = function(n_samples = 100, cores = parallel::detectCores() - 1, ...) {
+    #' @param worker_iter Iterations per worker chain in the multi-rho parallel
+    #'   loop. Default 2000. Increase if Stan reports low Bulk/Tail ESS.
+    #' @param worker_warmup Warmup per worker chain in the multi-rho parallel
+    #'   loop. Default 1000.
+    fit = function(n_samples = 100, cores = parallel::detectCores() - 1,
+                   worker_iter = 2000L, worker_warmup = 1000L, ...) {
       wide_df <- .makeWide(
         data      = private$data,
         id        = private$id,
@@ -299,17 +302,7 @@ nascSynth <- R6::R6Class(
       X1     <- pre_data  |> dplyr::pull(!!private$outcome)
       X_pred <- post_data |> dplyr::select(-!!private$time, -!!private$treated, -!!private$outcome)
 
-      # Number of *real* pre-treatment time periods. The covariate-as-extra-rows
-      # feature below (model1 engine only) appends synthetic rows to X/X1 so the
-      # Stan model also matches predictors. Stan then returns y_sim_pre with one
-      # entry per row of X (i.e. n_pre_real + n_covariate_rows). We need to
-      # remember n_pre_real here so we can slice y_sim_pre back down to real
-      # time periods before post-processing.
       n_pre_real <- nrow(pre_data)
-
-      # Covariate-as-extra-rows feature (Abadie-style predictor matching).
-      # Only applied for the model1 engine, since stan_2_NASC's Y_panel has
-      # spatial-aligned dimensions that cannot be extended with covariate rows.
       use_covariate_rows <- !private$nasc_penalty && !is.null(private$covariates)
 
       if (use_covariate_rows) {
@@ -342,13 +335,9 @@ nascSynth <- R6::R6Class(
         X1 <- c(X1, unlist(cov_wide[, treated_col, drop = TRUE]))
       }
 
-      donor_ids  <- colnames(X_pred)  # post-treatment donor list (pre-cov stack-safe)
+      donor_ids  <- colnames(X_pred)
       treated_id <- as.character(private$treated_ids)
 
-      # ----------------------------------------------------------------------
-      # Build spatial inputs (W block, lambda_W, optional Step-1 covariates)
-      # only if we actually need them.
-      # ----------------------------------------------------------------------
       W_J      <- NULL
       w_J1     <- NULL
       W_full   <- NULL
@@ -376,10 +365,9 @@ nascSynth <- R6::R6Class(
           }
           lambda_W <- Re(ev)
 
-          # Build covariate matrices for Step 1
           if (is.null(private$covariates)) {
             stop("SAR/SDM Step 1 requires 'covariates'. Either supply ",
-                 "covariates or pass an exogenous 'rho'.")
+                 "covariates or pass an exogenous rho.")
           }
           cov_names <- setdiff(
             names(private$covariates),
@@ -418,24 +406,20 @@ nascSynth <- R6::R6Class(
             stop("Missing values found in predictor matrix; please impute or drop.")
           }
 
-          # Y_panel for Step 1 (pre-cov stacking) and stan_2_NASC
           Y_panel <- t(as.matrix(
             pre_data |> dplyr::select(dplyr::all_of(donor_ids), !!private$outcome)
           ))
         } else if (private$nasc_penalty) {
-          # Need Y_panel for stan_2_NASC even without Step 1
           Y_panel <- t(as.matrix(
             pre_data |> dplyr::select(dplyr::all_of(donor_ids), !!private$outcome)
           ))
         }
       }
 
-      # ----------------------------------------------------------------------
       # STEP 1 (only if needed)
-      # ----------------------------------------------------------------------
       sampled_rhos <- if (private$uses_rho) {
         if (!is.null(private$rho_exogenous)) {
-          private$rho_exogenous   # single scalar
+          private$rho_exogenous
         } else if (private$uses_step1) {
 
           step1_data <- list(
@@ -479,16 +463,11 @@ nascSynth <- R6::R6Class(
           stop("Internal: uses_rho but no exogenous rho and no Step 1.")
         }
       } else {
-        NA_real_   # marker: no rho needed
+        NA_real_
       }
 
-      # ----------------------------------------------------------------------
-      # STEP 2 - dispatch to model1 or stan_2_NASC depending on nasc_penalty
-      # ----------------------------------------------------------------------
+      # STEP 2
       if (private$nasc_penalty) {
-
-        # ---- stan_2_NASC engine ----
-        # Always loops over rho draws (parallel when >1, single when scalar).
         base_data <- list(
           J                   = length(donor_ids),
           T0                  = nrow(pre_data),
@@ -502,17 +481,18 @@ nascSynth <- R6::R6Class(
         )
 
         results <- .run_step2_loop(
-          rhos       = sampled_rhos,
-          base_data  = base_data,
-          step2_mod  = private$stan_model$step2,
-          rho_field  = "rho",
-          cores      = cores,
-          extra_args = list(...),
-          extract_pars = c("y_counterfactual", "y_sim_pre", "w", "lambda",
-                           "sigma_sc", "bias_correction")
+          rhos          = sampled_rhos,
+          base_data     = base_data,
+          step2_mod     = private$stan_model$step2,
+          rho_field     = "rho",
+          cores         = cores,
+          extra_args    = list(...),
+          extract_pars  = c("y_counterfactual", "y_sim_pre", "w", "lambda",
+                            "sigma_sc", "bias_correction"),
+          worker_iter   = worker_iter,
+          worker_warmup = worker_warmup
         )
 
-        # When no Step 1 ran, expose Step 2 as the user-facing fit.
         if (is.null(private$fitted)) private$fitted <- results$last_fit
 
         private$y_synth_draws <- list(
@@ -522,32 +502,21 @@ nascSynth <- R6::R6Class(
           lambda           = results$lambda,
           sigma_sc         = results$sigma_sc,
           bias_correction  = results$bias_correction,
-          rhos_used        = results$rhos_used
+          rhos_used        = results$rhos_used,
+          worker_diagnostics = results$worker_diagnostics
         )
 
       } else {
-
-        # ---- model1 engine (with optional bias correction) ----
-        # Build the bias-correction inputs only if active. When inactive,
-        # J_bc = 0 and the spatial inputs are zero-sized placeholders Stan
-        # tolerates without computing anything.
         if (private$bias_correction) {
-          # In model1, the simplex `w` has length K = ncol(X). We need W_J
-          # to also be K x K aligned to the donor columns of X. The donors
-          # in X_pred (donor_ids) match the donor columns of X by construction
-          # (they are derived from the same wide_df).
           J_bc   <- ncol(X)
           W_J_bc <- W_J
           w_J1_bc <- w_J1
           rho_bc <- if (length(sampled_rhos) == 1L) sampled_rhos else NA_real_
-          # When sampled_rhos is a vector (Step 1 path), each Step 2 worker
-          # plugs in its own rho. The .run_step2_loop helper handles that via
-          # the `rho_field` argument.
         } else {
           J_bc    <- 0L
           W_J_bc  <- matrix(0, 0, 0)
           w_J1_bc <- numeric(0)
-          rho_bc  <- 0  # arbitrary value within (-1, 1); unused when J_bc = 0
+          rho_bc  <- 0
         }
 
         base_data <- list(
@@ -565,8 +534,6 @@ nascSynth <- R6::R6Class(
         )
 
         if (!private$bias_correction) {
-
-          # No spatial element at all -> single Stan fit, no rho loop.
           private$fitted <- rstan::sampling(
             private$stan_model$step2,
             data  = base_data,
@@ -579,38 +546,32 @@ nascSynth <- R6::R6Class(
             pars = c("y_counterfactual", "y_sim_pre", "w", "sigma",
                      "bias_correction")
           )
-          # y_sim_pre has one column per row of X. When covariate rows were
-          # stacked above, those trailing columns aren't real time periods --
-          # drop them so the post-processing aligns with pre_data.
           y_sim_pre_trim <- draws$y_sim_pre[, seq_len(n_pre_real), drop = FALSE]
           private$y_synth_draws <- list(
             y_counterfactual = draws$y_counterfactual,
             y_sim_pre        = y_sim_pre_trim,
             w                = draws$w,
             sigma            = draws$sigma,
-            bias_correction  = draws$bias_correction,  # all 1.0 in this branch
+            bias_correction  = draws$bias_correction,
             rhos_used        = NA_real_
           )
 
         } else {
-
-          # Bias correction on -> loop model1 across rho draws (same
-          # propagation pattern as the stan_2_NASC path).
           results <- .run_step2_loop(
-            rhos       = sampled_rhos,
-            base_data  = base_data,
-            step2_mod  = private$stan_model$step2,
-            rho_field  = "rho_bc",
-            cores      = cores,
-            extra_args = list(...),
-            extract_pars = c("y_counterfactual", "y_sim_pre", "w", "sigma",
-                             "bias_correction")
+            rhos          = sampled_rhos,
+            base_data     = base_data,
+            step2_mod     = private$stan_model$step2,
+            rho_field     = "rho_bc",
+            cores         = cores,
+            extra_args    = list(...),
+            extract_pars  = c("y_counterfactual", "y_sim_pre", "w", "sigma",
+                              "bias_correction"),
+            worker_iter   = worker_iter,
+            worker_warmup = worker_warmup
           )
 
           if (is.null(private$fitted)) private$fitted <- results$last_fit
 
-          # See the no-bias-correction branch above: drop covariate rows from
-          # y_sim_pre so it aligns with pre_data.
           y_sim_pre_trim <- results$y_sim_pre[, seq_len(n_pre_real), drop = FALSE]
           private$y_synth_draws <- list(
             y_counterfactual = results$y_counterfactual,
@@ -618,14 +579,12 @@ nascSynth <- R6::R6Class(
             w                = results$w,
             sigma            = results$sigma,
             bias_correction  = results$bias_correction,
-            rhos_used        = results$rhos_used
+            rhos_used        = results$rhos_used,
+            worker_diagnostics = results$worker_diagnostics
           )
         }
       }
 
-      # ----------------------------------------------------------------------
-      # Unified post-processing (single helper, both engines feed in)
-      # ----------------------------------------------------------------------
       private$plot_data <- .get_nasc_results(
         y_counterfactual_draws = private$y_synth_draws$y_counterfactual,
         bias_correction_draws  = private$y_synth_draws$bias_correction,
@@ -685,8 +644,6 @@ nascSynth <- R6::R6Class(
         ci_width
       }
 
-      # Reconstruct the rho-source string the constructor printed, so the
-      # summary stays self-describing without needing to capture it earlier.
       rho_source <- if (!private$uses_rho) {
         "n/a (no rho in use)"
       } else if (!is.null(private$rho_exogenous)) {
@@ -712,12 +669,6 @@ nascSynth <- R6::R6Class(
         fitted          = private$fitted
       ))
 
-      # Print the formatted summary explicitly. This works even if the S3
-      # method `print.summary.nascSynth` was not registered in NAMESPACE,
-      # because we're calling the function by its full name from the
-      # package namespace rather than going through S3 dispatch. Return
-      # invisibly so the structured list is still available via
-      # `s <- synth_sc$summary()` without spamming the console twice.
       if (isTRUE(print)) {
         print.summary.nascSynth(out)
       }
@@ -729,12 +680,139 @@ nascSynth <- R6::R6Class(
     effectPlot = function() {
       .plot_tau(
         data       = private$plot_data,
-        x          = private$time,
-        y          = tau,
-        ymin       = tau_LB,
-        ymax       = tau_UB,
+        x          = rlang::as_name(private$time),
+        y          = "tau",
+        ymin       = "tau_LB",
+        ymax       = "tau_UB",
         xintercept = private$intervention
       )
+    },
+
+    #' @description
+    #' Posterior density plots of the main scalar Bayesian parameters
+    #' (e.g. \code{rho}, \code{sigma}). One panel per parameter; vertical
+    #' lines show the posterior mean and the credible-interval bounds.
+    #' @param pars Optional character vector of parameter names to plot.
+    #'   Defaults to all scalar parameters available in the stanfit object,
+    #'   excluding \code{lp__} and high-dimensional vectors like \code{w}.
+    #' @param ci Credible interval width (default uses the object's setting).
+    posteriorPlot = function(pars = NULL, ci = NULL) {
+      if (is.null(private$fitted)) stop("Run fit() first.")
+      ci <- if (is.null(ci)) private$ci_width else ci
+
+      draws <- rstan::extract(private$fitted, permuted = TRUE)
+      # Keep only scalar (vector) parameters to keep plotting tractable
+      scalar_pars <- names(draws)[vapply(draws, function(x) is.numeric(x) &&
+                                           (is.null(dim(x)) || length(dim(x)) == 1L),
+                                         logical(1))]
+      scalar_pars <- setdiff(scalar_pars, "lp__")
+      if (!is.null(pars)) scalar_pars <- intersect(pars, scalar_pars)
+
+      if (length(scalar_pars) == 0L) {
+        stop("No scalar parameters found to plot.")
+      }
+
+      probs <- c((1 - ci) / 2, 1 - (1 - ci) / 2)
+      n <- length(scalar_pars)
+      nc <- ceiling(sqrt(n)); nr <- ceiling(n / nc)
+
+      op <- graphics::par(no.readonly = TRUE)
+      on.exit(graphics::par(op))
+      graphics::par(mfrow = c(nr, nc), mar = c(4, 4, 2, 1), bty = "l")
+
+      for (p in scalar_pars) {
+        x <- as.numeric(draws[[p]])
+        d <- stats::density(x, na.rm = TRUE)
+        m <- mean(x, na.rm = TRUE)
+        q <- stats::quantile(x, probs, na.rm = TRUE, names = FALSE)
+
+        plot(d, main = p, xlab = p, ylab = "density")
+        graphics::polygon(d, col = grDevices::adjustcolor("steelblue", alpha.f = 0.3),
+                          border = "steelblue")
+        graphics::abline(v = m, lwd = 2)
+        graphics::abline(v = q, lty = 2, col = "gray30")
+      }
+      invisible(NULL)
+    },
+
+    #' @description
+    #' Posterior density plots of the period-by-period treatment effects
+    #' (\code{tau_t}) for all post-treatment periods, plus the ATT.
+    #' Each post-period density is drawn as a stacked, color-filled curve
+    #' (ridge-style); the ATT is shown in a separate panel below.
+    #' @param ci Credible interval width (default uses the object's setting).
+    tauPosteriorPlot = function(ci = NULL) {
+      if (is.null(private$y_synth_draws)) stop("Run fit() first.")
+      ci <- if (is.null(ci)) private$ci_width else ci
+
+      # Reconstruct tau draws: matrix [n_draws x n_post_periods]
+      ycf <- private$y_synth_draws$y_counterfactual
+      bc  <- private$y_synth_draws$bias_correction
+      if (is.null(bc)) bc <- rep(1, ncol(ycf))
+
+      wide_df <- .makeWide(
+        data      = private$data,
+        id        = private$id,
+        time      = private$time,
+        outcome   = private$outcome,
+        treatment = private$treated
+      )
+      post_data <- wide_df |>
+        dplyr::filter(!!private$time >= private$intervention)
+      Y1_post <- post_data[[rlang::as_name(private$outcome)]]
+      time_post <- post_data[[rlang::as_name(private$time)]]
+
+      Y1_mat <- matrix(Y1_post, nrow = nrow(ycf), ncol = length(Y1_post),
+                       byrow = TRUE)
+      bc_mat <- matrix(bc, nrow = nrow(ycf), ncol = ncol(ycf), byrow = FALSE)
+      tau_draws <- (Y1_mat - ycf) * bc_mat
+      att_draws <- rowMeans(tau_draws)
+
+      probs <- c((1 - ci) / 2, 1 - (1 - ci) / 2)
+
+      op <- graphics::par(no.readonly = TRUE)
+      on.exit(graphics::par(op))
+      graphics::par(mfrow = c(2, 1), mar = c(4, 5, 2, 1), bty = "l")
+
+      # ---- Panel 1: per-period tau ridges ----
+      n_t <- ncol(tau_draws)
+      dens <- lapply(seq_len(n_t),
+                     function(i) stats::density(tau_draws[, i], na.rm = TRUE))
+      xr <- range(sapply(dens, function(d) d$x))
+      max_y <- max(sapply(dens, function(d) max(d$y)))
+      offset <- max_y * 1.1
+
+      plot(NA, xlim = xr, ylim = c(0, offset * (n_t + 1)),
+           xlab = "tau", ylab = "",
+           yaxt = "n",
+           main = "Per-period treatment effect posteriors")
+      graphics::axis(2, at = offset * seq_len(n_t),
+                     labels = as.character(time_post), las = 1)
+      cols <- grDevices::hcl.colors(n_t, palette = "Viridis", alpha = 0.7)
+      for (i in seq_len(n_t)) {
+        d <- dens[[i]]
+        y <- d$y + offset * i
+        graphics::polygon(c(d$x, rev(d$x)),
+                          c(y, rep(offset * i, length(d$x))),
+                          col = cols[i], border = "gray30")
+      }
+      graphics::abline(v = 0, lty = 2)
+
+      # ---- Panel 2: ATT density ----
+      d_att <- stats::density(att_draws, na.rm = TRUE)
+      m_att <- mean(att_draws)
+      q_att <- stats::quantile(att_draws, probs, names = FALSE)
+
+      plot(d_att, main = "ATT posterior",
+           xlab = "ATT", ylab = "density")
+      graphics::polygon(d_att,
+                        col = grDevices::adjustcolor("steelblue", alpha.f = 0.3),
+                        border = "steelblue")
+      graphics::abline(v = m_att, lwd = 2)
+      graphics::abline(v = q_att, lty = 2, col = "gray30")
+      graphics::abline(v = 0, lty = 3, col = "red")
+
+      invisible(NULL)
     },
 
     #' @description
@@ -754,19 +832,31 @@ nascSynth <- R6::R6Class(
 
       colnames(w_mat) <- donor_names
 
-      melt_w <- as.data.frame(w_mat) |>
-        tidyr::pivot_longer(
-          cols      = dplyr::everything(),
-          names_to  = "ID",
-          values_to = "weight"
-        )
+      op <- graphics::par(no.readonly = TRUE)
+      on.exit(graphics::par(op))
+      graphics::par(mar = c(4, 6, 2, 1))
 
-      melt_w |>
-        ggplot2::ggplot(ggplot2::aes(x = weight, y = ID, fill = ID)) +
-        ggridges::geom_density_ridges(alpha = 0.7) +
-        ggplot2::theme_minimal() +
-        ggplot2::theme(legend.position = "none") +
-        ggplot2::labs(x = "Donor Weight", y = "Donor Unit")
+      # One density per donor on a single panel, vertically offset (ridges-like)
+      dens <- lapply(seq_len(ncol(w_mat)),
+                     function(i) stats::density(w_mat[, i], na.rm = TRUE))
+      xr <- range(sapply(dens, function(d) d$x))
+      max_y <- max(sapply(dens, function(d) max(d$y)))
+      offset <- max_y * 1.1
+      n <- length(dens)
+
+      plot(NA, xlim = xr, ylim = c(0, offset * (n + 1)),
+           xlab = "Donor Weight", ylab = "Donor Unit",
+           yaxt = "n", bty = "l")
+      graphics::axis(2, at = offset * seq_len(n), labels = donor_names, las = 1)
+      cols <- grDevices::hcl.colors(n, palette = "Set 2", alpha = 0.7)
+      for (i in seq_len(n)) {
+        d <- dens[[i]]
+        y <- d$y + offset * i
+        graphics::polygon(c(d$x, rev(d$x)),
+                          c(y, rep(offset * i, length(d$x))),
+                          col = cols[i], border = "gray30")
+      }
+      invisible(NULL)
     },
 
     #' @description
@@ -785,34 +875,41 @@ nascSynth <- R6::R6Class(
       cormat <- round(cor(w_mat), 3)
       diag(cormat) <- NA
 
-      melted_cormat <- as.data.frame(cormat) |>
-        dplyr::mutate(X1 = factor(rownames(cormat), levels = donor_names)) |>
-        tidyr::pivot_longer(
-          cols      = -X1,
-          names_to  = "X2",
-          values_to = "value"
-        ) |>
-        dplyr::mutate(X2 = factor(X2, levels = donor_names))
+      n <- length(donor_names)
 
-      ggplot2::ggplot(data = melted_cormat, ggplot2::aes(x = X1, y = X2, fill = value)) +
-        ggplot2::geom_tile(color = "white") +
-        ggplot2::scale_fill_gradient2(
-          low      = "red",
-          mid      = "white",
-          high     = "green",
-          midpoint = 0,
-          limit    = c(-1, 1),
-          space    = "Lab",
-          name     = "Corr",
-          na.value = "transparent"
-        ) +
-        ggplot2::theme_minimal() +
-        ggplot2::theme(
-          axis.text.x      = ggplot2::element_text(angle = 90, vjust = 0.5, hjust = 1),
-          panel.grid.major = ggplot2::element_blank(),
-          panel.grid.minor = ggplot2::element_blank()
-        ) +
-        ggplot2::labs(x = "Donor Units", y = "Donor Units")
+      op <- graphics::par(no.readonly = TRUE)
+      on.exit(graphics::par(op))
+      graphics::par(mar = c(6, 6, 2, 5))
+
+      # Diverging palette red -> white -> green, midpoint 0
+      pal <- grDevices::colorRampPalette(c("red", "white", "green"))(101)
+      # Plot rows top-to-bottom to mirror typical heatmap orientation
+      mat_plot <- t(cormat)[, n:1, drop = FALSE]
+
+      graphics::image(
+        x = seq_len(n), y = seq_len(n), z = mat_plot,
+        zlim = c(-1, 1), col = pal,
+        xlab = "Donor Units", ylab = "Donor Units",
+        axes = FALSE
+      )
+      graphics::axis(1, at = seq_len(n), labels = donor_names, las = 2)
+      graphics::axis(2, at = seq_len(n), labels = rev(donor_names), las = 1)
+      graphics::box()
+
+      # Simple color legend on the right
+      lg <- seq(-1, 1, length.out = length(pal))
+      usr <- graphics::par("usr")
+      xl <- usr[2] + (usr[2] - usr[1]) * 0.02
+      xr <- usr[2] + (usr[2] - usr[1]) * 0.05
+      yb <- seq(usr[3], usr[4], length.out = length(pal) + 1)
+      graphics::rect(xl, yb[-length(yb)], xr, yb[-1],
+                     col = pal, border = NA, xpd = TRUE)
+      graphics::text(xr, c(usr[3], mean(usr[3:4]), usr[4]),
+                     labels = c("-1", "0", "1"),
+                     pos = 4, xpd = TRUE)
+      graphics::text(mean(c(xl, xr)), usr[4], "Corr",
+                     pos = 3, xpd = TRUE)
+      invisible(NULL)
     }
   )
 )

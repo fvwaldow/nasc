@@ -5,3 +5,7 @@
 .DS_Store
 .quarto
 .positai
+src/*.o
+src/*.dll
+src/*.so
+README.html

@@ -6,7 +6,7 @@
 \alias{nasc-package}
 \title{nasc: Network-Aware Synthetic Control Estimator}
 \description{
-Implements Bayesian Network-Aware Synthetic Control (NASC) estimators for causal inference in panel data settings. Provides tools for estimating treatment effects under spillovers and spatial dependence using Stan-based MCMC sampling, with support for single and multiple treated units, covariate adjustment, predictor matching, and network weight matrices.
+Implements the Network-Aware Synthetic Control (NASC) estimator for causal inference in panel data where the SUTVA is violated due to network or spatial interference. The package utilizes a modular Bayesian framework to estimate treatment effects and network dependencies while accounting for spillover magnitude and direction. Besides bias correction it features a novel penalized-weight regularization that discounts donor units based on their contamination risk. Supports Stan-based MCMC sampling for robust inference, covariate adjustment, and automated construction of network-aware counterfactuals using row-standardized spatial weight matrices.
 }
 \seealso{
 Useful links:
