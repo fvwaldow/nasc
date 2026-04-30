@@ -603,39 +603,185 @@ padding-top: 0px;
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
-<h1 id="nasc">nasc</h1>
+<h1 id="nasc---network-aware-synthetic-control-r-package">nasc -
+Network-Aware Synthetic Control R Package</h1>
 <!-- badges: start -->
 
 <!-- badges: end -->
 
-<p>The goal of nasc is to …</p>
+<h2 id="introduction">Introduction</h2>
+<p><code>nasc</code> is an R package that implements the
+<strong>Network-Aware Synthetic Control (NASC)</strong> estimator. It is
+based on the methodology of von Waldow (2026) and addresses the
+limitations of conventional synthetic control methods when SUTVA is
+violated and interference between units prevails.</p>
 <h2 id="installation">Installation</h2>
-<p>You can install the development version of nasc from <a href="https://github.com/">GitHub</a> with:</p>
-<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="co"># install.packages(&quot;pak&quot;)</span></span>
-<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a>pak<span class="sc">::</span><span class="fu">pak</span>(<span class="st">&quot;fvwaldow/nasc&quot;</span>)</span></code></pre></div>
-<h2 id="example">Example</h2>
-<p>This is a basic example which shows you how to solve a common
-problem:</p>
+<p>The development version of <code>nasc</code> can be installed from <a href="https://github.com/">GitHub</a> with:</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="co"># install.packages(&quot;devtools&quot;)</span></span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a>devtools<span class="sc">::</span><span class="fu">install_github</span>(<span class="st">&quot;fvwaldow/nasc&quot;</span>)</span></code></pre></div>
+<p>As the package compiles Stan models at install time, a working C++
+toolchain and a recent version of <a href="https://mc-stan.org/rstan/"><strong>rstan</strong></a> is
+needed.</p>
+<h2 id="quick-start">Quick Start</h2>
 <div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a><span class="fu">library</span>(nasc)</span>
-<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a><span class="do">## basic example code</span></span></code></pre></div>
-<p>What is special about using <code>README.Rmd</code> instead of just
-<code>README.md</code>? You can include R chunks like so:</p>
-<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a><span class="fu">summary</span>(cars)</span>
-<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a><span class="co">#&gt;      speed           dist       </span></span>
-<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a><span class="co">#&gt;  Min.   : 4.0   Min.   :  2.00  </span></span>
-<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a><span class="co">#&gt;  1st Qu.:12.0   1st Qu.: 26.00  </span></span>
-<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a><span class="co">#&gt;  Median :15.0   Median : 36.00  </span></span>
-<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a><span class="co">#&gt;  Mean   :15.4   Mean   : 42.98  </span></span>
-<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a><span class="co">#&gt;  3rd Qu.:19.0   3rd Qu.: 56.00  </span></span>
-<span id="cb3-8"><a href="#cb3-8" tabindex="-1"></a><span class="co">#&gt;  Max.   :25.0   Max.   :120.00</span></span></code></pre></div>
-<p>You’ll still need to render <code>README.Rmd</code> regularly, to
-keep <code>README.md</code> up-to-date.
-<code>devtools::build_readme()</code> is handy for this.</p>
-<p>You can also embed plots, for example:</p>
-<img role="img" src="data:image/png;base64,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" width="100%" />
-
-<p>In that case, don’t forget to commit and push the resulting figure
-files, so they display on GitHub and CRAN.</p>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a></span>
+<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a><span class="co"># View basic package information</span></span>
+<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a><span class="fu">packageDescription</span>(<span class="st">&quot;nasc&quot;</span>)</span>
+<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a></span>
+<span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a><span class="co"># List all functions in the package</span></span>
+<span id="cb2-7"><a href="#cb2-7" tabindex="-1"></a><span class="fu">ls</span>(<span class="st">&quot;package:nasc&quot;</span>)</span></code></pre></div>
+<p>A minimal end-to-end workflow looks like this:</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a><span class="fu">library</span>(nasc)</span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a></span>
+<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a><span class="co"># `panel`        long-format panel data with columns: id, year, y, treated</span></span>
+<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a><span class="co"># `W`            row-standardized spatial-weights matrix (units x units)</span></span>
+<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a><span class="co"># `panel_covs`   long-format covariates with columns: id, year, x1, x2, ...</span></span>
+<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a></span>
+<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a>mod <span class="ot">&lt;-</span> nascSynth<span class="sc">$</span><span class="fu">new</span>(</span>
+<span id="cb3-8"><a href="#cb3-8" tabindex="-1"></a>  <span class="at">data            =</span> panel,</span>
+<span id="cb3-9"><a href="#cb3-9" tabindex="-1"></a>  <span class="at">time            =</span> year,</span>
+<span id="cb3-10"><a href="#cb3-10" tabindex="-1"></a>  <span class="at">id              =</span> id,</span>
+<span id="cb3-11"><a href="#cb3-11" tabindex="-1"></a>  <span class="at">treated         =</span> treated,</span>
+<span id="cb3-12"><a href="#cb3-12" tabindex="-1"></a>  <span class="at">outcome         =</span> y,</span>
+<span id="cb3-13"><a href="#cb3-13" tabindex="-1"></a>  <span class="at">covariates      =</span> panel_covs,</span>
+<span id="cb3-14"><a href="#cb3-14" tabindex="-1"></a>  <span class="at">W               =</span> W,</span>
+<span id="cb3-15"><a href="#cb3-15" tabindex="-1"></a>  <span class="at">spatial_model   =</span> <span class="st">&quot;SAR&quot;</span>,</span>
+<span id="cb3-16"><a href="#cb3-16" tabindex="-1"></a>  <span class="at">bias_correction =</span> <span class="cn">TRUE</span>,</span>
+<span id="cb3-17"><a href="#cb3-17" tabindex="-1"></a>  <span class="at">nasc_penalty    =</span> <span class="cn">TRUE</span></span>
+<span id="cb3-18"><a href="#cb3-18" tabindex="-1"></a>)</span>
+<span id="cb3-19"><a href="#cb3-19" tabindex="-1"></a></span>
+<span id="cb3-20"><a href="#cb3-20" tabindex="-1"></a>mod<span class="sc">$</span><span class="fu">fit</span>(<span class="at">cores =</span> <span class="dv">12</span>)</span>
+<span id="cb3-21"><a href="#cb3-21" tabindex="-1"></a></span>
+<span id="cb3-22"><a href="#cb3-22" tabindex="-1"></a>mod<span class="sc">$</span><span class="fu">summary</span>()        <span class="co"># ATT, per-period effects, donor weights, diagnostics</span></span>
+<span id="cb3-23"><a href="#cb3-23" tabindex="-1"></a>mod<span class="sc">$</span>synthetic        <span class="co"># observed vs. synthetic outcome path</span></span>
+<span id="cb3-24"><a href="#cb3-24" tabindex="-1"></a>mod<span class="sc">$</span><span class="fu">effectPlot</span>()     <span class="co"># tau_t with credible interval</span></span></code></pre></div>
+<h2 id="usage">Usage</h2>
+<h3 id="core-functions">Core functions</h3>
+<p>The package exposes a single user-facing <a href="https://r6.r-lib.org/"><strong>R6</strong></a> class,
+<code>nascSynth</code>, and a comparison helper for overlaying several
+fitted models.</p>
+<table>
+<thead>
+<tr>
+<th>Function / method</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>nascSynth$new(...)</code></td>
+<td>Constructs an estimator. Selects a Stan model based on
+<code>spatial_model</code>, <code>bias_correction</code>, and
+<code>nasc_penalty</code></td>
+</tr>
+<tr>
+<td><code>mod$fit(n_samples, cores, ...)</code></td>
+<td>Runs the (optional) Step 1 spatial model and the Step 2
+synthetic-control model via MCMC</td>
+</tr>
+<tr>
+<td><code>mod$summary(ci_width, print)</code></td>
+<td>Posterior summary: ATT, per-period τₜ, donor weights, model
+parameters, and MCMC diagnostics</td>
+</tr>
+<tr>
+<td><code>mod$updateWidth(ci_width)</code></td>
+<td>Recomputes credible intervals at a different width without
+re-running MCMC</td>
+</tr>
+<tr>
+<td><code>mod$plotData</code></td>
+<td>Tibble of observed and counterfactual outcomes with
+credible-interval bounds</td>
+</tr>
+</tbody>
+</table>
+<h3 id="visualization-functions">Visualization functions</h3>
+<p>All plotting methods produce base R graphics.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Output</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>mod$synthetic</code></td>
+<td>Observed vs. synthetic outcome path with credible band</td>
+</tr>
+<tr>
+<td><code>mod$effectPlot()</code></td>
+<td>Treatment effect τₜ over time with credible band and intervention
+line</td>
+</tr>
+<tr>
+<td><code>mod$tauPosteriorPlot(ci)</code></td>
+<td>Stacked posterior distribution of period-by-period effects, plus the
+ATT posterior</td>
+</tr>
+<tr>
+<td><code>mod$posteriorPlot(pars, ci)</code></td>
+<td>Posterior distribution of scalar Bayesian parameters
+(e.g. <code>rho</code>, <code>sigma</code>, <code>lambda</code>)</td>
+</tr>
+<tr>
+<td><code>mod$weightDraws()</code></td>
+<td>Kernel densities of Bayesian implicit weights</td>
+</tr>
+<tr>
+<td><code>mod$weightCorr()</code></td>
+<td>Heatmap implicit weights correlations</td>
+</tr>
+<tr>
+<td><code>compare_nasc_plots(models, show_ci)</code></td>
+<td>Overlays the synthetic and effect plots of a named list of fitted
+<code>nascSynth</code> objects</td>
+</tr>
+</tbody>
+</table>
+<h2 id="methodological-notes">Methodological notes</h2>
+<p>The estimator decomposes into two steps that the package dispatches
+automatically.</p>
+<p><strong>Step 1 — spatial model.</strong> When
+<code>spatial_model</code> is <code>&quot;SAR&quot;</code> or <code>&quot;SDM&quot;</code>
+and no exogenous <code>rho</code> is supplied, a Bayesian SAR or Spatial
+Durbin Model is fit on the pre-treatment panel using the user-supplied
+covariates. Posterior draws of <em>ρ</em> are stratified across chains
+and propagated to Step 2 (<code>n_samples</code> controls sample size).
+When <code>spatial_model = &quot;exogenous&quot;</code>, Step 1 is skipped and the
+user-supplied scalar <code>rho</code> is used directly. When neither the
+bias correction nor the NASC penalty is active, no spatial parameter is
+needed and Step 1 is skipped entirely.</p>
+<p><strong>Step 2 — NASC weight estimation.</strong> Donor weights
+<em>w</em> are estimated on the pre-treatment outcome panel (and, when
+applicable, on covariate moments). The post-treatment counterfactual is
+reconstructed as a convex combination of the donor pool; if
+<code>bias_correction = TRUE</code>, it is rescaled by the bias
+correction term, so that contamination of the donor pool by spillovers
+from the treated unit is accountde for. If
+<code>nasc_penalty = TRUE</code>, the log-likelihood includes a penalty
+term, which discourages weight on units with strong network exposure to
+the treated unit. When several <em>ρ</em> draws are propagated from Step
+1, Step 2 is run in parallel across them with <code>furrr</code> and the
+resulting posteriors are pooled.</p>
+<p><strong>Spatial weights.</strong> The matrix <code>W</code> must be
+row-standardized and known a priori. The code checks this explicitly and
+aligns row/column names with the unit identifier so that donor and
+treated rows can be picked unambiguously.</p>
+<p><strong>Identification scope.</strong> The current implementation
+supports a single treated unit. Multiple treated units, staggered
+adoption, and non-stationary network structures are subject to further
+research.</p>
+<h2 id="citation">Citation</h2>
+<p>If <code>nasc</code> is implemented in academic work, please cite</p>
+<blockquote>
+<p>von Waldow, F. (2026). <em>Network-Aware Synthetic Control - Bias
+Correction and Regularization under Interference.</em> Master
+Thesis.</p>
+</blockquote>
+<h2 id="license">License</h2>
+<p>MIT License. See <code>LICENSE</code> for details.</p>
 
 </body>
 </html>
