@@ -846,7 +846,7 @@ nascSynth <- R6::R6Class(
                           col = grDevices::adjustcolor("steelblue", alpha.f = 0.3),
                           border = "steelblue")
       }
-      graphics::mtext("Per-period treatment effect posteriors",
+      graphics::mtext("",
                       side = 3, outer = TRUE, line = 0.5, font = 2)
 
       invisible(NULL)
