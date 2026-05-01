@@ -32,12 +32,12 @@
 #'
 #' @export
 contaminationPlot <- function(model,
-                                       signed         = FALSE,
-                                       edge_threshold = 1e-3,
-                                       layout         = NULL,
-                                       vertex_size    = 12,
-                                       label_cex      = 0.8,
-                                       directed       = FALSE) {
+                              signed         = FALSE,
+                              edge_threshold = 1e-3,
+                              layout         = NULL,
+                              vertex_size    = 12,
+                              label_cex      = 0.8,
+                              directed       = FALSE) {
 
   if (!requireNamespace("igraph", quietly = TRUE)) {
     stop("Package 'igraph' is required for contaminationPlot(). ",
@@ -113,7 +113,8 @@ contaminationPlot <- function(model,
 
   op <- graphics::par(no.readonly = TRUE)
   on.exit(graphics::par(op))
-  graphics::par(mar = c(1, 1, 2, 6))
+  # Right margin reserved for the colour bar (was 6; the new bar is compact).
+  graphics::par(mar = c(1, 1, 2, 4))
 
   igraph::plot.igraph(
     g,
@@ -132,24 +133,56 @@ contaminationPlot <- function(model,
     main = ""
   )
 
-  # Colour-bar legend on the right.
+  # ----------------------------------------------------------------
+  # Compact colour-bar legend, anchored in the upper right margin.
+  #
+  # Geometry choices:
+  #   * The bar sits *outside* the plot area (in the reserved right
+  #     margin) so donor nodes and labels never collide with it.
+  #   * Bar height = 35% of the plot height, top-aligned. This is
+  #     deliberately short -- a tall bar dominates whitespace and
+  #     competes visually with the network.
+  #   * Bar width is set in inches (independent of x-coordinate
+  #     scale, which igraph rescales unpredictably).
+  # ----------------------------------------------------------------
   usr <- graphics::par("usr")
-  xl <- usr[2] - (usr[2] - usr[1]) * 0.04
-  xr <- usr[2] - (usr[2] - usr[1]) * 0.01
-  yb <- seq(usr[3] + (usr[4] - usr[3]) * 0.1,
-            usr[4] - (usr[4] - usr[3]) * 0.1,
-            length.out = length(pal) + 1)
+  pin <- graphics::par("pin")          # plot region in inches
+  cxy <- graphics::par("cxy")          # one character cell in usr units
+
+  # Convert "0.18 inch" bar width into usr x-units.
+  bar_width_in <- 0.18
+  ux_per_in    <- (usr[2] - usr[1]) / pin[1]
+  bar_w        <- bar_width_in * ux_per_in
+
+  # Place bar just outside the right edge, with a small gap.
+  gap   <- 0.5 * cxy[1]
+  xl    <- usr[2] + gap
+  xr    <- xl + bar_w
+
+  # Vertical: 35% of plot height, anchored 5% below the top.
+  bar_h_frac <- 0.35
+  top_pad    <- 0.05
+  yt <- usr[4] - top_pad * (usr[4] - usr[3])
+  yb_bot <- yt - bar_h_frac * (usr[4] - usr[3])
+  yb <- seq(yb_bot, yt, length.out = length(pal) + 1)
+
   graphics::rect(xl, yb[-length(yb)], xr, yb[-1],
                  col = pal, border = NA, xpd = TRUE)
+  graphics::rect(xl, yb_bot, xr, yt,
+                 col = NA, border = "gray40", xpd = TRUE)
+
+  # Three tick labels (min, mid, max), placed to the right of the bar.
   if (signed) {
-    lab_at  <- c(yb[1], mean(range(yb)), yb[length(yb)])
     lab_txt <- formatC(c(-rng, 0, rng), digits = 2, format = "g")
   } else {
-    lab_at  <- c(yb[1], mean(range(yb)), yb[length(yb)])
     lab_txt <- formatC(c(0, rng / 2, rng), digits = 2, format = "g")
   }
-  graphics::text(xr, lab_at, labels = lab_txt, pos = 4, cex = 0.75, xpd = TRUE)
-  graphics::text(mean(c(xl, xr)), yb[length(yb)],
+  lab_at <- c(yb_bot, (yb_bot + yt) / 2, yt)
+  graphics::text(xr, lab_at, labels = lab_txt,
+                 pos = 4, cex = 0.7, xpd = TRUE)
+
+  # Title above the bar.
+  graphics::text(mean(c(xl, xr)), yt,
                  labels = if (signed) "s" else "|s|",
                  pos = 3, cex = 0.85, xpd = TRUE)
 
@@ -188,9 +221,9 @@ contaminationPlot <- function(model,
 #'
 #' @export
 contaminationScatter <- function(model,
-                                       signed = FALSE,
-                                       label  = TRUE,
-                                       top_n  = 10L) {
+                                 signed = FALSE,
+                                 label  = TRUE,
+                                 top_n  = 10L) {
 
   bits        <- .nasc_contamination_draws(model)
   donor_names <- bits$donor_names

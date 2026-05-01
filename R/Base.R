@@ -65,47 +65,7 @@ nascSynth <- R6::R6Class(
     plotData = function() { return(private$plot_data) },
 
     #' @field interventionTime The first treatment period
-    interventionTime = function() { return(private$intervention) },
-
-    #' @field synthetic Base R plot of observed vs synthetic outcomes
-    synthetic = function() {
-      df <- as.data.frame(private$plot_data)
-      time_name    <- rlang::as_name(private$time)
-      outcome_name <- rlang::as_name(private$outcome)
-
-      x   <- df[[time_name]]
-      obs <- df[[outcome_name]]
-      syn <- df$y_synth
-      lb  <- df$LB
-      ub  <- df$UB
-
-      ord <- order(x)
-      x <- x[ord]; obs <- obs[ord]; syn <- syn[ord]
-      lb <- lb[ord]; ub <- ub[ord]
-
-      yrng <- range(c(obs, syn, lb, ub), na.rm = TRUE)
-
-      op <- graphics::par(no.readonly = TRUE)
-      on.exit(graphics::par(op))
-      graphics::par(bty = "l", mar = c(6, 4, 2, 1))
-      graphics::par(bty = "l")
-
-      plot(x, obs, type = "n", ylim = yrng,
-           xlab = time_name, ylab = outcome_name)
-      graphics::grid(lty = "dotted", col = "gray80")
-      graphics::polygon(c(x, rev(x)), c(lb, rev(ub)),
-                        col = grDevices::adjustcolor("gray", alpha.f = 0.2),
-                        border = NA)
-      graphics::lines(x, obs, lty = 1, lwd = 2)
-      graphics::lines(x, syn, lty = 2, lwd = 2)
-      graphics::abline(v = private$intervention, lty = 3)
-  graphics::legend("bottom",
-                       inset  = c(0, -0.28),
-                       legend = c("Observed", "Synthetic"),
-                       lty    = c(1, 2), lwd = 2, bty = "n",
-                       horiz  = TRUE, xpd = TRUE)
-      invisible(NULL)
-    }
+    interventionTime = function() { return(private$intervention) }
   ),
   public = list(
 
@@ -294,16 +254,62 @@ nascSynth <- R6::R6Class(
     #' @description
     #' Fit the Stan model via MCMC.
     #' @param n_samples Number of rho draws to propagate to Step 2 when Step 1
-    #'   runs (default 100). Ignored when an exogenous rho was supplied or when
-    #'   no rho is in use.
+    #'   runs. Either a positive integer (default 100), or the string
+    #'   \code{"auto"}. When \code{"auto"}, the number is set to
+    #'   \code{min(round(n_eff_rho), n_samples_cap)} after Step 1 completes,
+    #'   floored at \code{n_samples_min}, so that the cut-posterior
+    #'   approximation does not oversample a low-information rho posterior.
+    #'   Ignored when an exogenous rho was supplied or when no rho is in use.
+    #' @param n_samples_cap Upper bound on the auto-selected \code{n_samples}.
+    #'   Default 200. Only used when \code{n_samples = "auto"}.
+    #' @param n_samples_min Lower bound on the auto-selected \code{n_samples}.
+    #'   Default 30. Only used when \code{n_samples = "auto"}.
     #' @param cores Number of CPU cores for parallel execution.
     #' @param ... Additional arguments forwarded to [rstan::sampling()].
     #' @param worker_iter Iterations per worker chain in the multi-rho parallel
     #'   loop. Default 2000. Increase if Stan reports low Bulk/Tail ESS.
     #' @param worker_warmup Warmup per worker chain in the multi-rho parallel
     #'   loop. Default 1000.
-    fit = function(n_samples = 100, cores = parallel::detectCores() - 1,
+    fit = function(n_samples = 100,
+                   n_samples_cap = 200L,
+                   n_samples_min = 30L,
+                   cores = parallel::detectCores() - 1,
                    worker_iter = 2000L, worker_warmup = 1000L, ...) {
+
+      # Validate n_samples up front: integer >= 1 or the literal string "auto".
+      auto_n_samples <- FALSE
+      if (is.character(n_samples) && length(n_samples) == 1L &&
+          identical(n_samples, "auto")) {
+        auto_n_samples <- TRUE
+      } else if (is.numeric(n_samples) && length(n_samples) == 1L &&
+                 !is.na(n_samples) && n_samples >= 1) {
+        n_samples <- as.integer(n_samples)
+      } else {
+        stop("'n_samples' must be a positive integer or the string \"auto\".")
+      }
+      if (!is.numeric(n_samples_cap) || length(n_samples_cap) != 1L ||
+          n_samples_cap < 1) {
+        stop("'n_samples_cap' must be a positive integer.")
+      }
+      if (!is.numeric(n_samples_min) || length(n_samples_min) != 1L ||
+          n_samples_min < 1) {
+        stop("'n_samples_min' must be a positive integer.")
+      }
+      if (n_samples_min > n_samples_cap) {
+        stop("'n_samples_min' cannot exceed 'n_samples_cap'.")
+      }
+      n_samples_cap <- as.integer(n_samples_cap)
+      n_samples_min <- as.integer(n_samples_min)
+
+      # If auto was requested but Step 1 won't run, n_samples is unused
+      # downstream anyway. Keep the variable numerically well-typed for
+      # safety and let the user know we ignored the auto request.
+      if (auto_n_samples && !isTRUE(private$uses_step1)) {
+        message("'n_samples = \"auto\"' has no effect when Step 1 does not ",
+                "run (exogenous rho or no rho); ignoring.")
+        n_samples <- n_samples_min
+        auto_n_samples <- FALSE
+      }
       wide_df <- .makeWide(
         data      = private$data,
         id        = private$id,
@@ -463,6 +469,47 @@ nascSynth <- R6::R6Class(
           rho_array <- rstan::extract(private$fitted, pars = "rho", permuted = FALSE)
           n_iters  <- dim(rho_array)[1]
           n_chains <- dim(rho_array)[2]
+          total_rho_draws <- n_iters * n_chains
+
+          # ----------------------------------------------------------------
+          # Auto-sizing of n_samples from the Step-1 ESS of rho.
+          #
+          # The cut posterior is approximated by a Monte Carlo average over
+          # rho draws. There is no point integrating over more independent
+          # rho values than the Step-1 chain actually produced, so we cap
+          # the subsample size at round(n_eff_rho), then bound the result
+          # below by n_samples_min and above by n_samples_cap. We also cap
+          # at the total number of post-warmup draws so we never request
+          # more than exists.
+          # ----------------------------------------------------------------
+          if (auto_n_samples) {
+            n_eff_rho <- tryCatch({
+              s <- rstan::summary(private$fitted, pars = "rho")$summary
+              as.numeric(s[, "n_eff"])
+            }, error = function(e) NA_real_)
+
+            if (!is.finite(n_eff_rho) || n_eff_rho <= 0) {
+              warning("Could not read n_eff for rho from the Step-1 fit; ",
+                      "falling back to n_samples = ", n_samples_min, ".")
+              n_samples <- n_samples_min
+            } else {
+              proposed  <- max(n_samples_min,
+                               min(n_samples_cap, as.integer(round(n_eff_rho))))
+              n_samples <- min(proposed, total_rho_draws)
+              message(sprintf(
+                "Auto n_samples: n_eff(rho) = %.1f -> n_samples = %d (cap %d, min %d).",
+                n_eff_rho, n_samples, n_samples_cap, n_samples_min
+              ))
+            }
+          } else {
+            if (n_samples > total_rho_draws) {
+              warning(sprintf(
+                "n_samples (%d) exceeds total Step-1 draws (%d); reducing to %d.",
+                n_samples, total_rho_draws, total_rho_draws
+              ))
+              n_samples <- total_rho_draws
+            }
+          }
 
           samples_per_chain <- ceiling(n_samples / n_chains)
           rho_draws <- numeric(0)
@@ -693,6 +740,52 @@ nascSynth <- R6::R6Class(
     },
 
     #' @description
+    #' Base R plot of the observed and synthetic-control outcome trajectories,
+    #' with a shaded credible-interval band around the synthetic series and a
+    #' dotted vertical line at the intervention time.
+    syntheticPlot = function() {
+      if (is.null(private$plot_data)) {
+        stop("Run $fit() before calling syntheticPlot().")
+      }
+
+      df <- as.data.frame(private$plot_data)
+      time_name    <- rlang::as_name(private$time)
+      outcome_name <- rlang::as_name(private$outcome)
+
+      x   <- df[[time_name]]
+      obs <- df[[outcome_name]]
+      syn <- df$y_synth
+      lb  <- df$LB
+      ub  <- df$UB
+
+      ord <- order(x)
+      x <- x[ord]; obs <- obs[ord]; syn <- syn[ord]
+      lb <- lb[ord]; ub <- ub[ord]
+
+      yrng <- range(c(obs, syn, lb, ub), na.rm = TRUE)
+
+      op <- graphics::par(no.readonly = TRUE)
+      on.exit(graphics::par(op))
+      graphics::par(bty = "l", mar = c(6, 4, 2, 1))
+
+      plot(x, obs, type = "n", ylim = yrng,
+           xlab = time_name, ylab = outcome_name)
+      graphics::grid(lty = "dotted", col = "gray80")
+      graphics::polygon(c(x, rev(x)), c(lb, rev(ub)),
+                        col = grDevices::adjustcolor("gray", alpha.f = 0.2),
+                        border = NA)
+      graphics::lines(x, obs, lty = 1, lwd = 2)
+      graphics::lines(x, syn, lty = 2, lwd = 2)
+      graphics::abline(v = private$intervention, lty = 3)
+      graphics::legend("bottom",
+                       inset  = c(0, -0.28),
+                       legend = c("Observed", "Synthetic"),
+                       lty    = c(1, 2), lwd = 2, bty = "n",
+                       horiz  = TRUE, xpd = TRUE)
+      invisible(NULL)
+    },
+
+    #' @description
     #' Plot the estimated treatment effect (tau) over time.
     effectPlot = function() {
       .plot_tau(
@@ -706,36 +799,122 @@ nascSynth <- R6::R6Class(
     },
 
     #' @description
-    #' Posterior density plots of the main scalar Bayesian parameters
-    #' \code{rho} and (when included in the model) \code{theta}. Each
-    #' parameter is shown in its own panel as a color-filled density curve.
-    spatialPlot = function() {
-      if (is.null(private$fitted)) stop("Run $fit() before calling spatialPlot.")
-
-      draws <- rstan::extract(private$fitted, permuted = TRUE)
-
-      # Restrict to rho and theta (if present in the fitted model)
-      target_pars <- c("rho", "theta")
-      scalar_pars <- intersect(target_pars, names(draws))
-
-      if (length(scalar_pars) == 0L) {
-        stop("Neither 'rho' nor 'theta' found in the fitted stan object.")
+    #' Posterior density plots of the main scalar Bayesian parameters that the
+    #' model actually estimated. Depending on the configuration, this may
+    #' include:
+    #' \itemize{
+    #'   \item \code{rho}             -- Step-1 spatial autocorrelation (SAR/SDM).
+    #'   \item \code{theta[k]}        -- Step-1 SDM spillover coefficients
+    #'                                   (one panel per covariate).
+    #'   \item \code{sigma_step1}     -- Step-1 residual SD (SAR or SDM).
+    #'   \item \code{lambda}          -- Step-2 NASC penalty strength
+    #'                                   (when \code{nasc_penalty = TRUE}).
+    #'   \item \code{sigma_step2}     -- Step-2 residual SD on the standardized
+    #'                                   outcome scale.
+    #'   \item \code{bias_correction} -- Posterior of the multiplicative bias
+    #'                                   factor \eqn{1/(1 - \langle w, s\rangle)}
+    #'                                   (when \code{bias_correction = TRUE}).
+    #'                                   Skipped when bias correction is off,
+    #'                                   since draws are constant at 1.
+    #' }
+    #' Each parameter is shown in its own panel as a color-filled density curve.
+    posteriorPlot = function() {
+      if (is.null(private$fitted) && is.null(private$y_synth_draws)) {
+        stop("Run $fit() before calling posteriorPlot().")
       }
 
-      n <- length(scalar_pars)
+      # ----------------------------------------------------------------
+      # Collect (label, draws) pairs from wherever each parameter lives.
+      # ----------------------------------------------------------------
+      panels <- list()
+
+      add_panel <- function(label, draws) {
+        if (is.null(draws)) return(invisible(NULL))
+        x <- as.numeric(draws)
+        x <- x[is.finite(x)]
+        if (length(x) < 2L || stats::sd(x) == 0) return(invisible(NULL))
+        panels[[length(panels) + 1L]] <<- list(label = label, draws = x)
+      }
+
+      # Step-1 scalars (rho, sigma_step1) and theta vector live in private$fitted
+      # whenever Step 1 ran. private$fitted may also be a Step-2 fit when Step 1
+      # was skipped, so we extract defensively rather than by branch.
+      step1_draws <- if (!is.null(private$fitted)) {
+        tryCatch(
+          rstan::extract(private$fitted, permuted = TRUE),
+          error = function(e) list()
+        )
+      } else {
+        list()
+      }
+
+      if (!is.null(step1_draws$rho)) {
+        add_panel("rho", step1_draws$rho)
+      }
+
+      # theta is a matrix (n_draws x K_pred) in the SDM model. Plot one density
+      # per component so the visualization is meaningful.
+      if (!is.null(step1_draws$theta)) {
+        th <- step1_draws$theta
+        if (is.matrix(th)) {
+          for (k in seq_len(ncol(th))) {
+            add_panel(sprintf("theta[%d]", k), th[, k])
+          }
+        } else {
+          add_panel("theta", th)
+        }
+      }
+
+      # Step-1 sigma is named differently per model: sigma_sar vs sigma_sdm.
+      # Surface either under a unified label.
+      if (!is.null(step1_draws$sigma_sar)) {
+        add_panel("sigma_step1", step1_draws$sigma_sar)
+      } else if (!is.null(step1_draws$sigma_sdm)) {
+        add_panel("sigma_step1", step1_draws$sigma_sdm)
+      }
+
+      # Step-2 scalars (lambda, sigma_step2, bias_correction) live in
+      # private$y_synth_draws. lambda is only present when nasc_penalty = TRUE
+      # (stan_2_NASC). bias_correction is a generated quantity equal to
+      # 1 / (1 - <w, s>) when bias correction is on, and the constant 1.0 when
+      # it is off; the constant case is auto-skipped by add_panel's sd > 0 guard.
+      if (!is.null(private$y_synth_draws)) {
+        if (!is.null(private$y_synth_draws$lambda)) {
+          add_panel("lambda", private$y_synth_draws$lambda)
+        }
+        # sigma_sc (penalty model) or sigma (model1); whichever is present.
+        if (!is.null(private$y_synth_draws$sigma_sc)) {
+          add_panel("sigma_step2", private$y_synth_draws$sigma_sc)
+        } else if (!is.null(private$y_synth_draws$sigma)) {
+          add_panel("sigma_step2", private$y_synth_draws$sigma)
+        }
+        if (!is.null(private$y_synth_draws$bias_correction)) {
+          add_panel("bias_correction", private$y_synth_draws$bias_correction)
+        }
+      }
+
+      if (length(panels) == 0L) {
+        stop("No estimated scalar parameters available to plot.")
+      }
+
+      # ----------------------------------------------------------------
+      # Layout: stack vertically; for many panels, switch to a 2-column
+      # grid so densities stay readable.
+      # ----------------------------------------------------------------
+      n <- length(panels)
+      ncol_grid <- if (n <= 4L) 1L else 2L
+      nrow_grid <- ceiling(n / ncol_grid)
+
       op <- graphics::par(no.readonly = TRUE)
       on.exit(graphics::par(op))
-      # Stack panels vertically for consistency with the other plots
-      graphics::par(mfrow = c(n, 1),
+      graphics::par(mfrow = c(nrow_grid, ncol_grid),
                     mar = c(4, 5, 2, 1),
                     bty = "l")
 
-      for (p in scalar_pars) {
-        x <- as.numeric(draws[[p]])
-        d <- stats::density(x, na.rm = TRUE)
-
-        plot(d, main = paste0(p, ""),
-             xlab = p, ylab = "density")
+      for (pn in panels) {
+        d <- stats::density(pn$draws, na.rm = TRUE)
+        plot(d, main = pn$label,
+             xlab = pn$label, ylab = "density")
         graphics::polygon(d,
                           col = grDevices::adjustcolor("steelblue", alpha.f = 0.3),
                           border = "steelblue")
