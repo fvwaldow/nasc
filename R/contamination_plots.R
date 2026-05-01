@@ -1,6 +1,5 @@
 # nasc_contamination_plots.R
 #
-
 #' Network graph coloured by donor contamination
 #'
 #' @description
