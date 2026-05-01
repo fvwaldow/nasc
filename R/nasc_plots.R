@@ -95,14 +95,13 @@ nascPlot <- function(models, show_ci = FALSE) {
   }
   graphics::abline(v = intervention_time, lty = 3, col = "gray40")
 
-  graphics::legend("bottom",
-                   inset  = c(0, -0.32),
+  graphics::legend("topleft",
                    legend = c("Observed", names(models)),
                    col    = c("black", cols),
                    lty    = c(1, rep(2, n_models)),
                    lwd    = 2,
-                   bty    = "n",
-                   horiz  = TRUE, xpd = TRUE)
+                   bg     = grDevices::adjustcolor("white", alpha.f = 0.85),
+                   box.col = "gray70")
 
   # ---------------------------------------------------------------
   # Plot 2: Treatment effect (tau)
@@ -136,13 +135,12 @@ nascPlot <- function(models, show_ci = FALSE) {
   graphics::abline(h = 0, lty = 1, col = "black")
   graphics::abline(v = intervention_time, lty = 3, col = "gray40")
 
-  graphics::legend("bottom",
-                   inset  = c(0, -0.32),
+  graphics::legend("topleft",
                    legend = names(models),
                    col    = cols,
                    lty    = 1, lwd = 2,
-                   bty    = "n",
-                   horiz  = TRUE, xpd = TRUE)
+                   bg     = grDevices::adjustcolor("white", alpha.f = 0.85),
+                   box.col = "gray70")
 
   invisible(NULL)
 }

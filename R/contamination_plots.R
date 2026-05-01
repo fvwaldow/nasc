@@ -209,11 +209,14 @@ contaminationPlot <- function(model,
 #' @param signed Logical. If \code{TRUE}, plot signed \eqn{\bar s_j} on the
 #'   x-axis with a vertical reference line at zero; if \code{FALSE}
 #'   (default), plot \eqn{\overline{|s_j|}}.
-#' @param label Logical. If \code{TRUE} (default), label points with donor
-#'   names. Set to \code{FALSE} for large donor pools.
-#' @param top_n Integer. When \code{label = TRUE}, only the \code{top_n}
-#'   donors with largest \eqn{\bar w_j \cdot |\bar s_j|} (their contribution
-#'   to the penalty) are labelled to avoid overplotting. Default \code{10}.
+#' @param label Logical. If \code{TRUE} (default), every marker is labelled
+#'   with its donor name. The top \code{top_n} contributors are emphasized
+#'   in bold. Set to \code{FALSE} to suppress all labels (useful for very
+#'   dense donor pools where labels would be unreadable).
+#' @param top_n Integer. When \code{label = TRUE}, the \code{top_n} donors
+#'   with largest \eqn{\bar w_j \cdot |\bar s_j|} (their contribution to
+#'   the penalty) are drawn in bold; remaining donors are still labelled,
+#'   in normal weight. Default \code{10}.
 #'
 #' @return Invisibly returns a tibble with columns \code{donor},
 #'   \code{w_mean}, \code{s_mean}, \code{abs_s_mean}, sorted by descending
@@ -255,15 +258,6 @@ contaminationScatter <- function(model,
   xlab <- if (signed) expression(bar(s)[j]) else expression(bar("|s|")[j])
   ylab <- expression(bar(w)[j])
 
-  # Point colour encodes contribution to the penalty (w * |s|).
-  if (max(contrib, na.rm = TRUE) > 0) {
-    pal <- grDevices::hcl.colors(101, palette = "YlOrRd", rev = TRUE)
-    idx <- round(contrib / max(contrib, na.rm = TRUE) * 100) + 1
-    pt_col <- pal[idx]
-  } else {
-    pt_col <- rep("steelblue", length(donor_names))
-  }
-
   plot(x_vals, y_vals, type = "n",
        xlab = xlab, ylab = ylab,
        main = "")
@@ -272,15 +266,32 @@ contaminationScatter <- function(model,
   graphics::abline(h = 0, lty = 2, col = "gray50")
 
   graphics::points(x_vals, y_vals,
-                   pch = 21, bg = pt_col, col = "gray30", cex = 1.4)
+                   pch = 1, col = "gray30", cex = 1.4, lwd = 1.2)
 
+  # Label every marker. Top contributors are drawn in bold; the rest in
+  # normal weight. To reduce overlap without adding a dependency on
+  # ggrepel, points in the upper half of the y-range are labelled below
+  # the marker (pos = 1) and points in the lower half above (pos = 3).
   if (isTRUE(label)) {
-    n_lab <- min(top_n, length(donor_names))
-    if (n_lab > 0L) {
-      lab_idx <- ord[seq_len(n_lab)]
-      graphics::text(x_vals[lab_idx], y_vals[lab_idx],
-                     labels = donor_names[lab_idx],
-                     pos = 3, cex = 0.75, offset = 0.4, xpd = TRUE)
+    n_donor <- length(donor_names)
+    if (n_donor > 0L) {
+      tn <- suppressWarnings(as.integer(top_n))
+      if (length(tn) != 1L || is.na(tn)) tn <- 0L
+      n_top  <- min(max(0L, tn), n_donor)
+      is_top <- logical(n_donor)
+      if (n_top > 0L) is_top[ord[seq_len(n_top)]] <- TRUE
+
+      # Stagger above/below by y-position to spread labels vertically.
+      y_mid <- mean(range(y_vals, na.rm = TRUE))
+      pos   <- ifelse(y_vals >= y_mid, 1L, 3L)
+
+      graphics::text(x_vals, y_vals,
+                     labels = donor_names,
+                     pos    = pos,
+                     cex    = ifelse(is_top, 0.85, 0.7),
+                     font   = ifelse(is_top, 2L, 1L),
+                     offset = 0.4,
+                     xpd    = TRUE)
     }
   }
 

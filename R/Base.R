@@ -766,7 +766,7 @@ nascSynth <- R6::R6Class(
 
       op <- graphics::par(no.readonly = TRUE)
       on.exit(graphics::par(op))
-      graphics::par(bty = "l", mar = c(6, 4, 2, 1))
+      graphics::par(bty = "l", mar = c(5, 4, 2, 1))
 
       plot(x, obs, type = "n", ylim = yrng,
            xlab = time_name, ylab = outcome_name)
@@ -777,11 +777,11 @@ nascSynth <- R6::R6Class(
       graphics::lines(x, obs, lty = 1, lwd = 2)
       graphics::lines(x, syn, lty = 2, lwd = 2)
       graphics::abline(v = private$intervention, lty = 3)
-      graphics::legend("bottom",
-                       inset  = c(0, -0.28),
+      graphics::legend("topleft",
                        legend = c("Observed", "Synthetic"),
-                       lty    = c(1, 2), lwd = 2, bty = "n",
-                       horiz  = TRUE, xpd = TRUE)
+                       lty    = c(1, 2), lwd = 2,
+                       bg     = grDevices::adjustcolor("white", alpha.f = 0.85),
+                       box.col = "gray70")
       invisible(NULL)
     },
 
