@@ -71,7 +71,7 @@ parameters {
 model {
   // Priors
   sigma_sc ~ normal(0, 1);
-  lambda   ~ gamma(1, 1);
+  lambda   ~ gamma(1, 5);
 
   // NASC Penalty (always on in this file)
   target += -lambda * dot_product(w, s_abs);
