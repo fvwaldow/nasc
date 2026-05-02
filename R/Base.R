@@ -57,6 +57,7 @@ nascSynth <- R6::R6Class(
     stan_model = NULL,
     y_synth_draws = NULL,
     treated_ids = NULL,
+    donor_ids   = NULL,
     uses_rho   = NULL,
     uses_step1 = NULL
   ),
@@ -194,15 +195,49 @@ nascSynth <- R6::R6Class(
         bias_correction, nasc_penalty, rho_src
       ))
 
-      if (!setequal(
-        data |>
-        dplyr::select(!!private$treated) |>
-        dplyr::distinct() |>
-        dplyr::pull({{ treated }}),
-        c(1, 0)
-      )) {
-        stop("Treated identifier is not binary (1/0).")
+      # ----------------------------------------------------------------
+      # Robust binary check on the treated indicator.
+      #
+      # The previous setequal({0,1}, distinct(D)) check failed legitimate
+      # inputs in three common cases:
+      #   * NAs present: distinct returns {0, 1, NA}, setequal -> FALSE
+      #   * factor with levels "0"/"1": setequal compares strings, OK by
+      #     coincidence, but downstream `D == 1` may behave oddly
+      #   * logical TRUE/FALSE: coerces, but fragile
+      #
+      # We accept numeric, integer, logical, and a "0"/"1" factor; we
+      # require both 0 and 1 to actually appear (no degenerate columns);
+      # NAs are tolerated and treated as "N/A" downstream.
+      # ----------------------------------------------------------------
+      trt_vec <- data |> dplyr::pull({{ treated }})
+      if (is.logical(trt_vec)) {
+        trt_num <- as.integer(trt_vec)
+      } else if (is.factor(trt_vec)) {
+        lv <- levels(trt_vec)
+        if (!all(lv %in% c("0", "1"))) {
+          stop("Treated identifier is a factor with levels other than ",
+               "'0'/'1': ", paste(lv, collapse = ", "), ".")
+        }
+        trt_num <- as.integer(as.character(trt_vec))
+      } else if (is.numeric(trt_vec)) {
+        trt_num <- trt_vec
+      } else {
+        stop("Treated identifier must be numeric, integer, logical, or a ",
+             "0/1 factor; got class '",
+             paste(class(trt_vec), collapse = "/"), "'.")
       }
+      uniq_non_na <- unique(trt_num[!is.na(trt_num)])
+      if (!all(uniq_non_na %in% c(0, 1))) {
+        stop("Treated identifier contains non-binary values: ",
+             paste(setdiff(uniq_non_na, c(0, 1)), collapse = ", "),
+             ". Expected only 0 and 1 (NA allowed).")
+      }
+      if (!all(c(0, 1) %in% uniq_non_na)) {
+        stop("Treated identifier must contain both 0 and 1; ",
+             "found only: ", paste(uniq_non_na, collapse = ", "), ".")
+      }
+      data <- data |>
+        dplyr::mutate(!!rlang::quo_name(rlang::enquo(treated)) := trt_num)
 
       private$data <- data |>
         dplyr::mutate(
@@ -360,6 +395,11 @@ nascSynth <- R6::R6Class(
 
       donor_ids  <- colnames(X_pred)
       treated_id <- as.character(private$treated_ids)
+
+      # Store the canonical donor ordering so post-hoc helpers (summary,
+      # contamination plots, etc.) can align posterior draws with W and
+      # with donor names without re-deriving them and getting it wrong.
+      private$donor_ids <- donor_ids
 
       W_J      <- NULL
       w_J1     <- NULL
@@ -540,7 +580,11 @@ nascSynth <- R6::R6Class(
           w_J1                = w_J1,
           T_post              = nrow(post_data),
           Y0_post             = as.matrix(X_pred[, donor_ids, drop = FALSE]),
-          Y1_post             = as.array(as.numeric(post_data |> dplyr::pull(!!private$outcome))), # one post-period is saved as vector, not scalar, for sake of stan combability
+          # as.array() forces a length-1 numeric to serialize as a length-1
+          # vector rather than a scalar (rstan would otherwise pass dims=()
+          # and Stan would reject vector[1] declarations). No effect when
+          # length > 1.
+          Y1_post             = as.array(as.numeric(post_data |> dplyr::pull(!!private$outcome))),
           use_bias_correction = as.integer(private$bias_correction)
         )
 
@@ -585,6 +629,8 @@ nascSynth <- R6::R6Class(
 
         base_data <- list(
           N                   = nrow(X),
+          # as.array() forces length-1 numerics to serialize as length-1
+          # vectors (Stan rejects scalars where vector[N] is declared).
           y                   = as.array(as.numeric(X1)),
           K                   = ncol(X),
           X                   = as.matrix(X),
@@ -593,7 +639,7 @@ nascSynth <- R6::R6Class(
           use_bias_correction = as.integer(private$bias_correction),
           J_bc                = J_bc,
           W_J                 = W_J_bc,
-          w_J1                = as.array(as.numeric(w_J1_bc)),
+          w_J1                = if (J_bc > 0L) as.array(as.numeric(w_J1_bc)) else numeric(0),
           rho_bc              = if (private$bias_correction) rho_bc else 0
         )
 
@@ -724,6 +770,7 @@ nascSynth <- R6::R6Class(
         outcome         = private$outcome,
         ci_width        = ci,
         treated_ids     = private$treated_ids,
+        donor_ids       = private$donor_ids,
         id_levels       = private$data[[rlang::as_name(private$id)]],
         spatial_model   = private$spatial_model,
         bias_correction = private$bias_correction,
@@ -1032,46 +1079,121 @@ nascSynth <- R6::R6Class(
     },
 
     #' @description
-    #' Plot implicit weight distribution across draws.
-    weightDraws = function() {
+    #' Ridgeline plot of the posterior weight density per donor. Densities
+    #' are stacked vertically, each labelled by donor name, and adjacent
+    #' ridges overlap by a configurable fraction so that each individual
+    #' density can be drawn taller without compressing the layout.
+    #'
+    #' @param overlap Numeric in \code{[0, 1)}. Fraction of vertical
+    #'   overlap between adjacent ridges. \code{0} reproduces the old
+    #'   non-overlapping layout; \code{0.5} (default) makes each ridge
+    #'   reach halfway into the row above; values close to \code{1}
+    #'   approach a fully-stacked look. Default \code{0.5}.
+    #' @param scale Numeric > 0. Multiplicative height of every ridge
+    #'   relative to the baseline step. Combined with \code{overlap} this
+    #'   controls how prominent each density is. Default \code{1.4}.
+    #' @param fill_alpha Numeric in \code{(0, 1]}. Alpha applied to the
+    #'   fill colours so overlapping ridges remain readable. Default
+    #'   \code{0.85}.
+    weightDraws = function(overlap = 0.5, scale = 1.4, fill_alpha = 0.85) {
       if (is.null(private$fitted)) stop("Run $fit() before calling weightDraws().")
+
+      stopifnot(
+        is.numeric(overlap), length(overlap) == 1L,
+        overlap >= 0, overlap < 1,
+        is.numeric(scale), length(scale) == 1L, scale > 0,
+        is.numeric(fill_alpha), length(fill_alpha) == 1L,
+        fill_alpha > 0, fill_alpha <= 1
+      )
 
       w_mat <- private$y_synth_draws$w
 
+      # Use the canonical donor ordering stored at fit time. Falling back
+      # to setdiff(levels(id), treated_id) silently scrambles labels when
+      # the long data isn't sorted by id.
       treated_id <- as.character(private$treated_ids)
-      all_ids <- levels(private$data[[rlang::as_name(private$id)]])
-      donor_names <- setdiff(all_ids, treated_id)
+      donor_names <- private$donor_ids
+      if (is.null(donor_names)) {
+        all_ids     <- levels(private$data[[rlang::as_name(private$id)]])
+        donor_names <- setdiff(all_ids, treated_id)
+      }
 
       if (ncol(w_mat) != length(donor_names)) {
         stop("Mismatch between the number of weights and donor names.")
       }
-
       colnames(w_mat) <- donor_names
+
+      n <- ncol(w_mat)
+
+      # Per-donor density. We compute on a common x-grid so the shapes
+      # are directly comparable; densities are NOT renormalized per ridge,
+      # so a peaked donor is visibly taller than a flat one.
+      dens <- lapply(seq_len(n), function(i) {
+        stats::density(w_mat[, i], na.rm = TRUE)
+      })
+
+      x_range <- range(unlist(lapply(dens, function(d) d$x)))
+      max_y   <- max(vapply(dens, function(d) max(d$y), numeric(1)))
+      if (!is.finite(max_y) || max_y <= 0) max_y <- 1  # degenerate safety
+
+      # ---------------------------------------------------------------
+      # Layout geometry.
+      #
+      # `step` is the vertical distance between adjacent donor baselines.
+      # `ridge_h` is the maximum drawn height of any single density.
+      #
+      # The relationship overlap = 1 - step/ridge_h means:
+      #   overlap = 0   -> step = ridge_h     (no overlap; old behaviour)
+      #   overlap = 0.5 -> step = 0.5*ridge_h (half-overlap; ridges
+      #                                        reach halfway into row above)
+      #   overlap -> 1  -> step -> 0          (fully stacked; not useful)
+      #
+      # `scale` then expands ridge_h relative to the implied baseline,
+      # letting the user make ridges taller without changing the spacing
+      # logic. We anchor on max_y so the tallest density gets exactly
+      # `scale * max_y` of vertical room.
+      # ---------------------------------------------------------------
+      ridge_h <- scale * max_y
+      step    <- ridge_h * (1 - overlap)
+      # Top of the topmost ridge sits at step*n + ridge_h; pad a little.
+      ylim_top <- step * n + ridge_h * 1.05
+      # Bottom: a small negative cushion so the lowest baseline isn't
+      # flush with the x-axis frame.
+      ylim_bot <- -ridge_h * 0.05
 
       op <- graphics::par(no.readonly = TRUE)
       on.exit(graphics::par(op))
       graphics::par(mar = c(4, 6, 2, 1))
 
-      # One density per donor on a single panel, vertically offset (ridges-like)
-      dens <- lapply(seq_len(ncol(w_mat)),
-                     function(i) stats::density(w_mat[, i], na.rm = TRUE))
-      xr <- range(sapply(dens, function(d) d$x))
-      max_y <- max(sapply(dens, function(d) max(d$y)))
-      offset <- max_y * 1.1
-      n <- length(dens)
-
-      plot(NA, xlim = xr, ylim = c(0, offset * (n + 1)),
+      plot(NA,
+           xlim = x_range, ylim = c(ylim_bot, ylim_top),
            xlab = "Donor Weight", ylab = "Donor Unit",
            yaxt = "n", bty = "l")
-      graphics::axis(2, at = offset * seq_len(n), labels = donor_names, las = 1)
-      cols <- grDevices::hcl.colors(n, palette = "Set 2", alpha = 0.7)
-      for (i in seq_len(n)) {
+      graphics::axis(2, at = step * seq_len(n), labels = donor_names, las = 1)
+
+      cols <- grDevices::hcl.colors(n, palette = "Set 2", alpha = fill_alpha)
+
+      # Draw from TOP donor down to BOTTOM donor. In a stacked plot the
+      # last polygon drawn sits in front of earlier ones, so to get the
+      # canonical ridgeline look (lower rows appearing in front), the
+      # bottom ridge must be drawn last. seq(n, 1) does exactly that.
+      for (i in seq(n, 1L, by = -1L)) {
         d <- dens[[i]]
-        y <- d$y + offset * i
-        graphics::polygon(c(d$x, rev(d$x)),
-                          c(y, rep(offset * i, length(d$x))),
-                          col = cols[i], border = "gray30")
+        baseline <- step * i
+        # Each density is scaled to ridge_h at its own peak * (this peak /
+        # global max), preserving relative heights across donors.
+        y <- baseline + d$y * (ridge_h / max_y)
+        graphics::polygon(
+          x = c(d$x, rev(d$x)),
+          y = c(y, rep(baseline, length(d$x))),
+          col    = cols[i],
+          border = "gray30"
+        )
+        # Thin baseline rule for visual anchoring.
+        graphics::segments(x_range[1], baseline, x_range[2], baseline,
+                           col = "gray60", lwd = 0.5)
       }
+
       invisible(NULL)
     },
 
@@ -1082,9 +1204,13 @@ nascSynth <- R6::R6Class(
 
       w_mat <- private$y_synth_draws$w
 
+      # Use canonical donor ordering (see weightDraws() for rationale).
       treated_id <- as.character(private$treated_ids)
-      all_ids <- levels(private$data[[rlang::as_name(private$id)]])
-      donor_names <- setdiff(all_ids, treated_id)
+      donor_names <- private$donor_ids
+      if (is.null(donor_names)) {
+        all_ids     <- levels(private$data[[rlang::as_name(private$id)]])
+        donor_names <- setdiff(all_ids, treated_id)
+      }
 
       colnames(w_mat) <- donor_names
 

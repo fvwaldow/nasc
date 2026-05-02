@@ -150,6 +150,22 @@
 
 
 .get_nasc_results <- function(y_counterfactual_draws, bias_correction_draws, y_sim_pre_draws, pre_data, post_data, time, outcome, ci = 0.75) {
+  # Defensive: when every Step-2 worker fails to create the sampler, the
+  # parallel loop returns empty arrays that rbind down to NULL or a 0-row
+  # matrix. Without this check the caller eventually hits an opaque
+  # "non-numeric matrix extent" error inside matrix() far below; with it,
+  # the user gets an actionable message.
+  if (is.null(y_counterfactual_draws) ||
+      !is.matrix(y_counterfactual_draws) ||
+      nrow(y_counterfactual_draws) == 0L) {
+    stop("Step 2 produced no posterior draws (likely all workers failed to ",
+         "create the sampler). Check that base_data dimensions match the ",
+         "Stan declarations -- in particular that Y1_post is wrapped in ",
+         "as.array() so a length-1 post-treatment period serializes as a ",
+         "vector and not a scalar -- and that all rho draws stay strictly ",
+         "inside (-1, 1).")
+  }
+
   post_times <- post_data |> dplyr::pull(!!time)
   Y1_post    <- post_data |> dplyr::pull(!!outcome)
 
@@ -402,8 +418,18 @@
 
   w_mat <- draws$w
   treated_id  <- as.character(parts$treated_ids)
-  all_ids     <- levels(parts$id_levels)
-  donor_names <- setdiff(all_ids, treated_id)
+  # Canonical donor ordering = colnames(X_pred) at fit time. Falling back
+  # to setdiff(levels(id), treated_id) silently scrambles labels whenever
+  # the long data isn't sorted by id.
+  donor_ids <- parts$donor_ids
+  if (is.null(donor_ids)) {
+    warning("parts$donor_ids missing (older fitted object?); falling back ",
+            "to factor-level ordering. Donor labels in the weights table ",
+            "may be misaligned for fits produced before this fix.")
+    all_ids   <- levels(parts$id_levels)
+    donor_ids <- setdiff(all_ids, treated_id)
+  }
+  donor_names <- donor_ids
   if (!is.null(w_mat) && ncol(w_mat) == length(donor_names)) {
     colnames(w_mat) <- donor_names
   }
@@ -708,70 +734,97 @@ summary.nascSynth <- function(object, ...) {
     stop("Posterior draws of donor weights 'w' are missing from the fit.")
   }
 
-  treated_id  <- as.character(priv$treated_ids)
-  all_ids     <- levels(priv$data[[rlang::as_name(priv$id)]])
-  donor_names <- setdiff(all_ids, treated_id)
-
-  if (ncol(w_mat) != length(donor_names)) {
-    stop("Mismatch between number of weight columns and donor names.")
+  # Canonical donor ordering: exactly what Stan saw at fit time. Stored on
+  # private state by $fit() so post-hoc helpers don't have to re-derive it
+  # (and get it wrong by using factor-level order instead of column order
+  # from pivot_wider).
+  treated_id <- as.character(priv$treated_ids)
+  donor_ids  <- priv$donor_ids
+  if (is.null(donor_ids)) {
+    warning("priv$donor_ids not stored on this fit; falling back to ",
+            "factor-level ordering. Donor labels and contamination values ",
+            "may be misaligned for older fitted objects -- re-fit to be safe.")
+    all_ids   <- levels(priv$data[[rlang::as_name(priv$id)]])
+    donor_ids <- setdiff(all_ids, treated_id)
   }
-  colnames(w_mat) <- donor_names
 
-  # Reorder W to put donors first, treated last (mirrors logic in $fit())
+  if (ncol(w_mat) != length(donor_ids)) {
+    stop("Mismatch: w_mat has ", ncol(w_mat), " columns but ",
+         length(donor_ids), " donors were used at fit time.")
+  }
+  colnames(w_mat) <- donor_ids
+
+  # Reorder W to match Stan's ordering exactly: donors first (in donor_ids
+  # order), treated last. Same logic as in $fit().
   W_full <- as.matrix(priv$W)
   if (is.null(rownames(W_full)) || is.null(colnames(W_full))) {
+    all_ids <- levels(priv$data[[rlang::as_name(priv$id)]])
     rownames(W_full) <- colnames(W_full) <- all_ids
   }
-  W_full <- W_full[c(donor_names, treated_id), c(donor_names, treated_id)]
-  J <- length(donor_names)
-  W_J <- W_full[seq_len(J), seq_len(J), drop = FALSE]
+  W_full <- W_full[c(donor_ids, treated_id), c(donor_ids, treated_id)]
+  J     <- length(donor_ids)
+  W_J   <- W_full[seq_len(J), seq_len(J), drop = FALSE]
+  # IMPORTANT: w_J1 is the donor-to-treated COLUMN of W (a fixed property
+  # of the network), not the SC simplex weights from Stan. The previous
+  # implementation used w_mat[d, ] here, which produced a meaningless
+  # quantity that happened to have the right shape.
+  w_J1  <- as.numeric(W_full[seq_len(J), J + 1])
 
-  # Reconstruct s_draws = rho_d * (W_J %*% w_d) for each draw d.
-  #
-  # `rhos_used` may have one of three shapes depending on the fit path:
-  #   * length 1                 : exogenous rho or single-fit Step 2.
-  #   * length == nrow(w_mat)    : one rho per posterior draw (single-fit
-  #                                Stan stored it that way for bookkeeping).
-  #   * length == n_workers      : multi-rho parallel loop -- each worker
-  #                                ran with one fixed rho and contributed
-  #                                draws_per_worker rows to w_mat. Expand
-  #                                each worker's rho across its draws.
+  # Posterior draws of rho. May come in three shapes depending on the fit
+  # path -- see comments inline.
   rhos    <- priv$y_synth_draws$rhos_used
   n_draws <- nrow(w_mat)
 
-  if (length(rhos) == 1L) {
-    rhos_per_draw <- rep(rhos, n_draws)
-  } else if (length(rhos) == n_draws) {
-    rhos_per_draw <- rhos
-  } else if (n_draws %% length(rhos) == 0L) {
-    draws_per_worker <- n_draws %/% length(rhos)
-    rhos_per_draw    <- rep(rhos, each = draws_per_worker)
-  } else {
-    warning("rhos_used has length ", length(rhos),
-            " but w has ", n_draws, " draws; using the posterior mean of ",
-            "rho for all draws.")
-    rhos_per_draw <- rep(mean(rhos, na.rm = TRUE), n_draws)
+  rhos_per_draw <-
+    if (length(rhos) == 1L) {
+      # Exogenous rho or single-fit Step 2 with one fixed rho.
+      rep(rhos, n_draws)
+    } else if (length(rhos) == n_draws) {
+      # One rho per posterior draw.
+      rhos
+    } else if (n_draws %% length(rhos) == 0L) {
+      # Multi-rho parallel loop: each worker ran with one fixed rho and
+      # contributed n_draws/length(rhos) rows to w_mat. Expand each
+      # worker's rho across its draws.
+      draws_per_worker <- n_draws %/% length(rhos)
+      rep(rhos, each = draws_per_worker)
+    } else {
+      warning("rhos_used has length ", length(rhos),
+              " but w has ", n_draws, " draws; using the posterior mean of ",
+              "rho for all draws.")
+      rep(mean(rhos, na.rm = TRUE), n_draws)
+    }
+
+  # The contamination vector
+  #   s = rho * (I_J - rho * W_J)^{-1} %*% w_J1
+  # depends ONLY on rho (and on the fixed network terms W_J, w_J1), not on
+  # the SC weights. Solve once per UNIQUE rho rather than once per
+  # posterior draw -- in a multi-rho parallel run with, say, 100 workers
+  # this is two orders of magnitude cheaper than the previous loop.
+  I_J         <- diag(J)
+  unique_rhos <- unique(rhos_per_draw)
+  s_by_rho    <- vapply(unique_rhos, function(r) {
+    as.numeric(r * solve(I_J - r * W_J, w_J1))
+  }, numeric(J))
+  if (J == 1L) {
+    # vapply returns a vector when FUN.VALUE is length-1; promote to
+    # matrix so the lookup below works uniformly.
+    s_by_rho <- matrix(s_by_rho, nrow = 1L)
   }
-  rhos <- rhos_per_draw
 
-  I_J <- diag(J)
-  s_mat <- matrix(NA_real_, nrow = n_draws, ncol = J)
-  colnames(s_mat) <- donor_names
-
+  s_mat <- matrix(NA_real_, nrow = n_draws, ncol = J,
+                  dimnames = list(NULL, donor_ids))
+  rho_idx <- match(rhos_per_draw, unique_rhos)
   for (d in seq_len(n_draws)) {
-    # Compute: s = rho * solve(I_J - rho * W_J) %*% w_d
-    spatial_multiplier <- solve(I_J - rhos[d] * W_J)
-    s_mat[d, ] <- rhos[d] * (spatial_multiplier %*% w_mat[d, ])
+    s_mat[d, ] <- s_by_rho[, rho_idx[d]]
   }
-
-  colnames(s_mat) <- donor_names
 
   list(
-    donor_names = donor_names,
+    donor_names = donor_ids,
     treated_id  = treated_id,
     w_mat       = w_mat,
     s_mat       = s_mat,
     W_full      = W_full,
-    rhos_used   = rhos
+    rhos_used   = rhos_per_draw
   )
 }
