@@ -540,7 +540,7 @@ nascSynth <- R6::R6Class(
           w_J1                = w_J1,
           T_post              = nrow(post_data),
           Y0_post             = as.matrix(X_pred[, donor_ids, drop = FALSE]),
-          Y1_post             = post_data |> dplyr::pull(!!private$outcome),
+          Y1_post             = as.array(as.numeric(post_data |> dplyr::pull(!!private$outcome))), # one post-period is saved as vector, not scalar, for sake of stan combability
           use_bias_correction = as.integer(private$bias_correction)
         )
 
@@ -585,7 +585,7 @@ nascSynth <- R6::R6Class(
 
         base_data <- list(
           N                   = nrow(X),
-          y                   = X1,
+          y                   = as.array(as.numeric(X1)),
           K                   = ncol(X),
           X                   = as.matrix(X),
           N_pred              = nrow(X_pred),
@@ -593,7 +593,7 @@ nascSynth <- R6::R6Class(
           use_bias_correction = as.integer(private$bias_correction),
           J_bc                = J_bc,
           W_J                 = W_J_bc,
-          w_J1                = w_J1_bc,
+          w_J1                = as.array(as.numeric(w_J1_bc)),
           rho_bc              = if (private$bias_correction) rho_bc else 0
         )
 
