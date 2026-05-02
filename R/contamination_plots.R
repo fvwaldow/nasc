@@ -225,7 +225,7 @@ contaminationPlot <- function(model,
 contaminationScatter <- function(model,
                                  signed = FALSE,
                                  label  = TRUE,
-                                 top_n  = 10L) {
+                                 top_n  = 10L) { # Kept to maintain backward compatibility with existing calls
 
   bits        <- .nasc_contamination_draws(model)
   donor_names <- bits$donor_names
@@ -267,18 +267,13 @@ contaminationScatter <- function(model,
   graphics::points(x_vals, y_vals,
                    pch = 1, col = "gray30", cex = 1.4, lwd = 1.2)
 
-  # Label every marker. Top contributors are drawn in bold; the rest in
-  # normal weight. To reduce overlap without adding a dependency on
+  # Label every marker uniformly in normal weight.
+  # To reduce overlap without adding a dependency on
   # ggrepel, points in the upper half of the y-range are labelled below
   # the marker (pos = 1) and points in the lower half above (pos = 3).
   if (isTRUE(label)) {
     n_donor <- length(donor_names)
     if (n_donor > 0L) {
-      tn <- suppressWarnings(as.integer(top_n))
-      if (length(tn) != 1L || is.na(tn)) tn <- 0L
-      n_top  <- min(max(0L, tn), n_donor)
-      is_top <- logical(n_donor)
-      if (n_top > 0L) is_top[ord[seq_len(n_top)]] <- TRUE
 
       # Stagger above/below by y-position to spread labels vertically.
       y_mid <- mean(range(y_vals, na.rm = TRUE))
@@ -287,8 +282,8 @@ contaminationScatter <- function(model,
       graphics::text(x_vals, y_vals,
                      labels = donor_names,
                      pos    = pos,
-                     cex    = ifelse(is_top, 0.85, 0.7),
-                     font   = ifelse(is_top, 2L, 1L),
+                     cex    = 0.75, # Uniform size for all labels
+                     font   = 1L,   # Uniform normal weight for all labels
                      offset = 0.4,
                      xpd    = TRUE)
     }
