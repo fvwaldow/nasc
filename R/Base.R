@@ -1092,9 +1092,11 @@ nascSynth <- R6::R6Class(
     #' @param scale Numeric > 0. Multiplicative height of every ridge
     #'   relative to the baseline step. Combined with \code{overlap} this
     #'   controls how prominent each density is. Default \code{1.4}.
-    #' @param fill_alpha Numeric in \code{(0, 1]}. Alpha applied to the
-    #'   fill colours so overlapping ridges remain readable. Default
-    #'   \code{0.85}.
+    #' @param fill_alpha Numeric in \code{(0, 1]}. Multiplier on the
+    #'   default fill transparency (\eqn{\approx 0.4} alpha at
+    #'   \code{fill_alpha = 1}). Lower values make overlapping ridges
+    #'   more transparent. Default \code{0.85}, matching the look of
+    #'   \code{posteriorPlot()}.
     weightDraws = function(overlap = 0.5, scale = 1.4, fill_alpha = 0.85) {
       if (is.null(private$fitted)) stop("Run $fit() before calling weightDraws().")
 
@@ -1171,7 +1173,8 @@ nascSynth <- R6::R6Class(
            yaxt = "n", bty = "l")
       graphics::axis(2, at = step * seq_len(n), labels = donor_names, las = 1)
 
-      cols <- grDevices::hcl.colors(n, palette = "Set 2", alpha = fill_alpha)
+      cols   <- rep(grDevices::adjustcolor("steelblue", alpha.f = fill_alpha * 0.4), n)
+      border <- "steelblue"
 
       # Draw from TOP donor down to BOTTOM donor. In a stacked plot the
       # last polygon drawn sits in front of earlier ones, so to get the
@@ -1187,7 +1190,7 @@ nascSynth <- R6::R6Class(
           x = c(d$x, rev(d$x)),
           y = c(y, rep(baseline, length(d$x))),
           col    = cols[i],
-          border = "gray30"
+          border = border
         )
         # Thin baseline rule for visual anchoring.
         graphics::segments(x_range[1], baseline, x_range[2], baseline,

@@ -38,11 +38,9 @@ AND (ii) no exogenous rho was supplied.
 \section{Active bindings}{
 \if{html}{\out{<div class="r6-active-bindings">}}
 \describe{
-\item{\code{plotData}}{Tibble with observed and counterfactual outcomes}
+\item{\code{plotData}}{Tibble with observed and counterfactual outcomes.}
 
-\item{\code{interventionTime}}{The first treatment period}
-
-\item{\code{synthetic}}{Base R plot of observed vs synthetic outcomes}
+\item{\code{interventionTime}}{The first treatment period.}
 }
 \if{html}{\out{</div>}}
 }
@@ -53,9 +51,11 @@ AND (ii) no exogenous rho was supplied.
 \item \href{#method-nascSynth-fit}{\code{nascSynth$fit()}}
 \item \href{#method-nascSynth-updateWidth}{\code{nascSynth$updateWidth()}}
 \item \href{#method-nascSynth-summary}{\code{nascSynth$summary()}}
+\item \href{#method-nascSynth-syntheticPlot}{\code{nascSynth$syntheticPlot()}}
 \item \href{#method-nascSynth-effectPlot}{\code{nascSynth$effectPlot()}}
 \item \href{#method-nascSynth-posteriorPlot}{\code{nascSynth$posteriorPlot()}}
-\item \href{#method-nascSynth-tauPosteriorPlot}{\code{nascSynth$tauPosteriorPlot()}}
+\item \href{#method-nascSynth-attPlot}{\code{nascSynth$attPlot()}}
+\item \href{#method-nascSynth-tauPlot}{\code{nascSynth$tauPlot()}}
 \item \href{#method-nascSynth-weightDraws}{\code{nascSynth$weightDraws()}}
 \item \href{#method-nascSynth-weightCorr}{\code{nascSynth$weightCorr()}}
 \item \href{#method-nascSynth-clone}{\code{nascSynth$clone()}}
@@ -86,6 +86,30 @@ Create a new nascSynth object.
 \subsection{Arguments}{
 \if{html}{\out{<div class="arguments">}}
 \describe{
+\item{\code{data}}{A data frame in long format containing the panel data.
+Must include columns for the unit identifier, time, outcome, and
+a binary treatment indicator (1 = treated, 0 = untreated).}
+
+\item{\code{time}}{Unquoted column name for the time variable.}
+
+\item{\code{id}}{Unquoted column name for the unit identifier.}
+
+\item{\code{treated}}{Unquoted column name for the binary treatment indicator
+(1 in treated periods for the treated unit, 0 otherwise).}
+
+\item{\code{outcome}}{Unquoted column name for the outcome variable.}
+
+\item{\code{ci_width}}{Numeric in \code{(0, 1)}. Width of the credible interval.
+Default is \code{0.75}.}
+
+\item{\code{covariates}}{Optional data frame in long format with columns for
+\code{id}, \code{time}, and one or more predictor variables. Required
+when \code{spatial_model} is \code{"SAR"} or \code{"SDM"}.}
+
+\item{\code{W}}{Optional row-standardized spatial weights matrix. Row and column
+names should match the unit identifiers in \code{data}. Required when
+\code{bias_correction = TRUE} or \code{nasc_penalty = TRUE}.}
+
 \item{\code{spatial_model}}{One of \code{"none"}, \code{"SAR"}, \code{"SDM"},
 or \code{"exogenous"}.}
 
@@ -95,7 +119,8 @@ skipped and this value is used in Step 2 regardless of
 
 \item{\code{bias_correction}}{Logical. If \code{TRUE}, the post-treatment
 counterfactual is rescaled by \eqn{1/(1 - w's)}. Default is \code{TRUE}
-for SAR/SDM/exogenous and \code{FALSE} for \code{spatial_model = "none"}.}
+for SAR/SDM/exogenous and \code{FALSE} for
+\code{spatial_model = "none"}.}
 
 \item{\code{nasc_penalty}}{Logical. If \code{TRUE}, the NASC penalty
 \eqn{-\lambda \langle w, |s| \rangle} enters the likelihood. Same
@@ -112,6 +137,8 @@ Fit the Stan model via MCMC.
 \subsection{Usage}{
 \if{html}{\out{<div class="r">}}\preformatted{nascSynth$fit(
   n_samples = 100,
+  n_samples_cap = 200L,
+  n_samples_min = 30L,
   cores = parallel::detectCores() - 1,
   worker_iter = 2000L,
   worker_warmup = 1000L,
@@ -123,8 +150,18 @@ Fit the Stan model via MCMC.
 \if{html}{\out{<div class="arguments">}}
 \describe{
 \item{\code{n_samples}}{Number of rho draws to propagate to Step 2 when Step 1
-runs (default 100). Ignored when an exogenous rho was supplied or when
-no rho is in use.}
+runs. Either a positive integer (default 100), or the string
+\code{"auto"}. When \code{"auto"}, the number is set to
+\code{min(round(n_eff_rho), n_samples_cap)} after Step 1 completes,
+floored at \code{n_samples_min}, so that the cut-posterior
+approximation does not oversample a low-information rho posterior.
+Ignored when an exogenous rho was supplied or when no rho is in use.}
+
+\item{\code{n_samples_cap}}{Upper bound on the auto-selected \code{n_samples}.
+Default 200. Only used when \code{n_samples = "auto"}.}
+
+\item{\code{n_samples_min}}{Lower bound on the auto-selected \code{n_samples}.
+Default 30. Only used when \code{n_samples = "auto"}.}
 
 \item{\code{cores}}{Number of CPU cores for parallel execution.}
 
@@ -148,6 +185,14 @@ Update the credible interval width and recompute plot data.
 \if{html}{\out{<div class="r">}}\preformatted{nascSynth$updateWidth(ci_width = 0.75)}\if{html}{\out{</div>}}
 }
 
+\subsection{Arguments}{
+\if{html}{\out{<div class="arguments">}}
+\describe{
+\item{\code{ci_width}}{Numeric in \code{(0, 1)}. New credible-interval width.
+Default \code{0.75}.}
+}
+\if{html}{\out{</div>}}
+}
 }
 \if{html}{\out{<hr>}}
 \if{html}{\out{<a id="method-nascSynth-summary"></a>}}
@@ -175,10 +220,24 @@ structured list silently for programmatic use.}
 }
 }
 \if{html}{\out{<hr>}}
+\if{html}{\out{<a id="method-nascSynth-syntheticPlot"></a>}}
+\if{latex}{\out{\hypertarget{method-nascSynth-syntheticPlot}{}}}
+\subsection{Method \code{syntheticPlot()}}{
+Base R plot of the observed and synthetic-control outcome trajectories,
+with a shaded credible-interval band around the synthetic series and a
+dotted vertical line at the intervention time.
+\subsection{Usage}{
+\if{html}{\out{<div class="r">}}\preformatted{nascSynth$syntheticPlot()}\if{html}{\out{</div>}}
+}
+
+}
+\if{html}{\out{<hr>}}
 \if{html}{\out{<a id="method-nascSynth-effectPlot"></a>}}
 \if{latex}{\out{\hypertarget{method-nascSynth-effectPlot}{}}}
 \subsection{Method \code{effectPlot()}}{
-Plot the estimated treatment effect (tau) over time.
+Plot the estimated treatment effect (\eqn{\tau_t}) over time as a
+line with a shaded credible-interval band, with a horizontal zero
+reference and a dotted vertical line at the intervention time.
 \subsection{Usage}{
 \if{html}{\out{<div class="r">}}\preformatted{nascSynth$effectPlot()}\if{html}{\out{</div>}}
 }
@@ -188,60 +247,97 @@ Plot the estimated treatment effect (tau) over time.
 \if{html}{\out{<a id="method-nascSynth-posteriorPlot"></a>}}
 \if{latex}{\out{\hypertarget{method-nascSynth-posteriorPlot}{}}}
 \subsection{Method \code{posteriorPlot()}}{
-Posterior density plots of the main scalar Bayesian parameters
-(e.g. \code{rho}, \code{sigma}). One panel per parameter; vertical
-lines show the posterior mean and the credible-interval bounds.
+Posterior density plots of the main scalar Bayesian parameters.
+Depending on the configuration, panels may include:
+\itemize{
+\item \code{rho} -- Spatial autocorrelation parameter (Step 1).
+\item \code{theta[k]} -- SDM spillover coefficients, one panel per
+predictor (when \code{spatial_model = "SDM"}).
+\item \code{sigma_step1} -- Step-1 residual SD (\code{sigma_sar} or
+\code{sigma_sdm}, surfaced under a unified label).
+\item \code{lambda} -- NASC penalty strength (when
+\code{nasc_penalty = TRUE}).
+\item \code{sigma_step2} -- Step-2 residual SD on the standardized
+outcome scale.
+\item \code{bias_correction} -- Posterior of the multiplicative bias
+factor \eqn{1/(1 - \langle w, s \rangle)} (when
+\code{bias_correction = TRUE}). Skipped when bias correction is
+off, since draws are constant at 1.
+}
+Each parameter is shown in its own panel as a color-filled density
+curve.
 \subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{nascSynth$posteriorPlot(pars = NULL, ci = NULL)}\if{html}{\out{</div>}}
+\if{html}{\out{<div class="r">}}\preformatted{nascSynth$posteriorPlot()}\if{html}{\out{</div>}}
 }
 
-\subsection{Arguments}{
-\if{html}{\out{<div class="arguments">}}
-\describe{
-\item{\code{pars}}{Optional character vector of parameter names to plot.
-Defaults to all scalar parameters available in the stanfit object,
-excluding \code{lp__} and high-dimensional vectors like \code{w}.}
-
-\item{\code{ci}}{Credible interval width (default uses the object's setting).}
-}
-\if{html}{\out{</div>}}
-}
 }
 \if{html}{\out{<hr>}}
-\if{html}{\out{<a id="method-nascSynth-tauPosteriorPlot"></a>}}
-\if{latex}{\out{\hypertarget{method-nascSynth-tauPosteriorPlot}{}}}
-\subsection{Method \code{tauPosteriorPlot()}}{
-Posterior density plots of the period-by-period treatment effects
-(\code{tau_t}) for all post-treatment periods, plus the ATT.
-Each post-period density is drawn as a stacked, color-filled curve
-(ridge-style); the ATT is shown in a separate panel below.
+\if{html}{\out{<a id="method-nascSynth-attPlot"></a>}}
+\if{latex}{\out{\hypertarget{method-nascSynth-attPlot}{}}}
+\subsection{Method \code{attPlot()}}{
+Posterior density plot of the average treatment effect on the treated
+(ATT), pooled across all post-treatment periods. The density is shown
+as a color-filled curve.
 \subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{nascSynth$tauPosteriorPlot(ci = NULL)}\if{html}{\out{</div>}}
+\if{html}{\out{<div class="r">}}\preformatted{nascSynth$attPlot()}\if{html}{\out{</div>}}
 }
 
-\subsection{Arguments}{
-\if{html}{\out{<div class="arguments">}}
-\describe{
-\item{\code{ci}}{Credible interval width (default uses the object's setting).}
 }
-\if{html}{\out{</div>}}
+\if{html}{\out{<hr>}}
+\if{html}{\out{<a id="method-nascSynth-tauPlot"></a>}}
+\if{latex}{\out{\hypertarget{method-nascSynth-tauPlot}{}}}
+\subsection{Method \code{tauPlot()}}{
+Posterior density plots of the period-by-period treatment effects
+(\code{tau_t}) for all post-treatment periods. Each post-period density
+is drawn in its own stacked panel as a color-filled curve. All panels
+share a common x-axis for visual comparability across periods.
+\subsection{Usage}{
+\if{html}{\out{<div class="r">}}\preformatted{nascSynth$tauPlot()}\if{html}{\out{</div>}}
 }
+
 }
 \if{html}{\out{<hr>}}
 \if{html}{\out{<a id="method-nascSynth-weightDraws"></a>}}
 \if{latex}{\out{\hypertarget{method-nascSynth-weightDraws}{}}}
 \subsection{Method \code{weightDraws()}}{
-Plot implicit weight distribution across draws.
+Ridgeline plot of the posterior weight density per donor. Densities
+are stacked vertically, each labelled by donor name, and adjacent
+ridges overlap by a configurable fraction so that each individual
+density can be drawn taller without compressing the layout. Fills
+match the steelblue palette of \code{posteriorPlot()}.
 \subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{nascSynth$weightDraws()}\if{html}{\out{</div>}}
+\if{html}{\out{<div class="r">}}\preformatted{nascSynth$weightDraws(overlap = 0.5, scale = 1.4, fill_alpha = 0.85)}\if{html}{\out{</div>}}
 }
 
+\subsection{Arguments}{
+\if{html}{\out{<div class="arguments">}}
+\describe{
+\item{\code{overlap}}{Numeric in \code{[0, 1)}. Fraction of vertical
+overlap between adjacent ridges. \code{0} reproduces the old
+non-overlapping layout; \code{0.5} (default) makes each ridge
+reach halfway into the row above; values close to \code{1}
+approach a fully-stacked look. Default \code{0.5}.}
+
+\item{\code{scale}}{Numeric > 0. Multiplicative height of every ridge
+relative to the baseline step. Combined with \code{overlap} this
+controls how prominent each density is. Default \code{1.4}.}
+
+\item{\code{fill_alpha}}{Numeric in \code{(0, 1]}. Multiplier on the
+default fill transparency (\eqn{\approx 0.4} alpha at
+\code{fill_alpha = 1}). Lower values make overlapping ridges more
+transparent. Default \code{0.85}, matching the look of
+\code{posteriorPlot()}.}
+}
+\if{html}{\out{</div>}}
+}
 }
 \if{html}{\out{<hr>}}
 \if{html}{\out{<a id="method-nascSynth-weightCorr"></a>}}
 \if{latex}{\out{\hypertarget{method-nascSynth-weightCorr}{}}}
 \subsection{Method \code{weightCorr()}}{
-Plot correlations between weights across draws.
+Heatmap of pairwise Pearson correlations between donor weights across
+posterior draws. The diagonal is set to \code{NA} so the off-diagonal
+structure is not visually dominated by the trivial unit correlations.
 \subsection{Usage}{
 \if{html}{\out{<div class="r">}}\preformatted{nascSynth$weightCorr()}\if{html}{\out{</div>}}
 }
