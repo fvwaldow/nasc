@@ -754,9 +754,16 @@ summary.nascSynth <- function(object, ...) {
   }
   rhos <- rhos_per_draw
 
-  # s_mat[d, ] = rhos[d] * (W_J %*% w_mat[d, ])
-  # (W_J %*% t(w_mat)) gives J x n_draws; transpose and scale row-wise.
-  s_mat <- t(W_J %*% t(w_mat)) * rhos
+  I_J <- diag(J)
+  s_mat <- matrix(NA_real_, nrow = n_draws, ncol = J)
+  colnames(s_mat) <- donor_names
+
+  for (d in seq_len(n_draws)) {
+    # Compute: s = rho * solve(I_J - rho * W_J) %*% w_d
+    spatial_multiplier <- solve(I_J - rhos[d] * W_J)
+    s_mat[d, ] <- rhos[d] * (spatial_multiplier %*% w_mat[d, ])
+  }
+
   colnames(s_mat) <- donor_names
 
   list(

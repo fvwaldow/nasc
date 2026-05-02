@@ -72,7 +72,23 @@ contaminationPlot <- function(model,
   is_treated <- v_names == treated_id
 
   # Build per-donor contamination value used for colouring.
+  v_names <- igraph::V(g)$name
+  is_treated <- v_names == treated_id
+
+  # Build per-donor contamination value used for colouring.
   v_score <- numeric(length(v_names))
+  names(v_score) <- v_names
+
+  # Identify which vertices are donors
+  donor_v <- v_names[!is_treated]
+
+  # Safely assign by exact name matching
+  if (signed) {
+    v_score[donor_v] <- s_mean[donor_v]
+  } else {
+    v_score[donor_v] <- s_abs_mean[donor_v]
+  }
+
   donor_match <- match(v_names, donor_names)
   if (signed) {
     v_score[!is.na(donor_match)] <- s_mean[donor_match[!is.na(donor_match)]]
