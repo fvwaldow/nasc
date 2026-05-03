@@ -472,6 +472,50 @@
     .mcmc_diagnostics(parts$fitted)
   }
 
+  # ----------------------------------------------------------------
+  # Indirect (spillover) effects -- Proposition 6.2.
+  #
+  # Computed only when (i) a fitted model object is available on parts
+  # (so we can rebuild s from rho and W) AND (ii) the configuration uses
+  # rho. Without rho, spillover is identically zero by construction and
+  # we omit the indirect blocks rather than print zeros.
+  # ----------------------------------------------------------------
+  indirect_per_period_total <- NULL  # period-total spillover (sum over donors)
+  indirect_per_donor        <- NULL  # average across periods, per donor
+  indirect_avg_total        <- NULL  # scalar: average total spillover (analog ATT)
+  if (isTRUE(parts$uses_rho) && !is.null(parts$model)) {
+    ind <- tryCatch(
+      .nasc_indirect_draws(parts$model),
+      error = function(e) NULL
+    )
+    if (!is.null(ind)) {
+      delta_total_draws <- ind$delta_total                  # [n_draws x T_post]
+      avg_per_donor_dr  <- ind$avg_per_donor                # [n_draws x J]
+      avg_total_draws   <- ind$avg_total                    # [n_draws]
+
+      indirect_per_period_total <- tibble::tibble(
+        !!time_nm := ind$time_post,
+        mean   = apply(delta_total_draws, 2, mean),
+        sd     = apply(delta_total_draws, 2, stats::sd),
+        lower  = apply(delta_total_draws, 2, \(x) stats::quantile(x, .ci_probs(ci)[1], names = FALSE)),
+        upper  = apply(delta_total_draws, 2, \(x) stats::quantile(x, .ci_probs(ci)[2], names = FALSE)),
+        p_pos  = apply(delta_total_draws, 2, \(x) mean(x > 0))
+      )
+
+      indirect_per_donor <- tibble::tibble(
+        donor = ind$donor_names,
+        mean  = apply(avg_per_donor_dr, 2, mean),
+        sd    = apply(avg_per_donor_dr, 2, stats::sd),
+        lower = apply(avg_per_donor_dr, 2, \(x) stats::quantile(x, .ci_probs(ci)[1], names = FALSE)),
+        upper = apply(avg_per_donor_dr, 2, \(x) stats::quantile(x, .ci_probs(ci)[2], names = FALSE)),
+        p_pos = apply(avg_per_donor_dr, 2, \(x) mean(x > 0))
+      ) |>
+        dplyr::arrange(dplyr::desc(abs(mean)))
+
+      indirect_avg_total <- .posterior_summary(avg_total_draws, ci)
+    }
+  }
+
   out <- list(
     header = list(
       spatial_model   = parts$spatial_model,
@@ -490,6 +534,10 @@
     ),
     att         = att,
     per_period  = per_period,
+    # Indirect effect blocks: NULL when no rho is in use.
+    indirect_per_period = indirect_per_period_total,
+    indirect_per_donor  = indirect_per_donor,
+    indirect_avg        = indirect_avg_total,
     pre_rmse    = pre_rmse,
     pre_r2      = pre_r2,
     post_rmse   = post_rmse,
@@ -533,8 +581,9 @@ print.summary.nascSynth <- function(x, digits = 3, max_donors = 10, ...) {
   ci_lo <- sprintf("l-%g%% CrI", ci_pct)
   ci_hi <- sprintf("u-%g%% CrI", ci_pct)
 
-  # Per-period TE
-  cat("Per-period TE\n")
+  # Per-period TE (direct effect)
+  has_indirect <- !is.null(x$indirect_per_period)
+  cat(if (has_indirect) "Per-period direct effect\n" else "Per-period TE\n")
   pp <- x$per_period
   pp_print <- data.frame(
     period = format(pp[[h$time]]),
@@ -554,10 +603,10 @@ print.summary.nascSynth <- function(x, digits = 3, max_donors = 10, ...) {
   print(pp_print, row.names = FALSE, right = TRUE)
   cat("\n")
 
-  # ATT
+  # ATT (direct)
   att <- x$att
   att_p_dir <- if (att["mean"] >= 0) att["p_pos"] else 1 - att["p_pos"]
-  cat("ATT\n")
+  cat(if (has_indirect) "ATT (direct effect)\n" else "ATT\n")
   att_print <- data.frame(
     blank   = "",
     mean    = formatC(att["mean"],  digits = digits, format = "f"),
@@ -575,6 +624,90 @@ print.summary.nascSynth <- function(x, digits = 3, max_donors = 10, ...) {
   names(att_print)[5] <- ci_hi
   print(att_print, row.names = FALSE, right = TRUE)
   cat("\n")
+
+  # ----------------------------------------------------------------
+  # Indirect (spillover) effects (Proposition 6.2).
+  #
+  # Three blocks, all gated on x$indirect_per_period being non-NULL
+  # (which itself is gated on uses_rho = TRUE in .nasc_summary_stats):
+  #   1. Per-period total spillover  -- sum over donors per t
+  #   2. Average total spillover     -- analog of ATT for spillovers
+  #   3. Per-donor average spillover -- top contributors over post period
+  # ----------------------------------------------------------------
+  if (!is.null(x$indirect_per_period)) {
+    cat("Per-period indirect effect (total spillover, summed across donors)\n")
+    ip <- x$indirect_per_period
+    ip_print <- data.frame(
+      period = format(ip[[h$time]]),
+      mean   = formatC(ip$mean,  digits = digits, format = "f"),
+      sd     = formatC(ip$sd,    digits = digits, format = "f"),
+      lower  = formatC(ip$lower, digits = digits, format = "f"),
+      upper  = formatC(ip$upper, digits = digits, format = "f"),
+      `Pr>0` = formatC(ip$p_pos, digits = 3, format = "f"),
+      check.names = FALSE,
+      stringsAsFactors = FALSE
+    )
+    names(ip_print)[1] <- "Period"
+    names(ip_print)[2] <- "Estimate"
+    names(ip_print)[3] <- "Est.Error"
+    names(ip_print)[4] <- ci_lo
+    names(ip_print)[5] <- ci_hi
+    print(ip_print, row.names = FALSE, right = TRUE)
+    cat("\n")
+  }
+
+  if (!is.null(x$indirect_avg)) {
+    ia <- x$indirect_avg
+    ia_p_dir <- if (ia["mean"] >= 0) ia["p_pos"] else 1 - ia["p_pos"]
+    cat("Average indirect effect (total spillover, averaged across post-periods)\n")
+    ia_print <- data.frame(
+      blank  = "",
+      mean   = formatC(ia["mean"],  digits = digits, format = "f"),
+      sd     = formatC(ia["sd"],    digits = digits, format = "f"),
+      lower  = formatC(ia["lower"], digits = digits, format = "f"),
+      upper  = formatC(ia["upper"], digits = digits, format = "f"),
+      `Pr>0` = formatC(ia_p_dir,    digits = max(digits, 3), format = "f"),
+      check.names = FALSE,
+      stringsAsFactors = FALSE
+    )
+    names(ia_print)[1] <- ""
+    names(ia_print)[2] <- "Estimate"
+    names(ia_print)[3] <- "Est.Error"
+    names(ia_print)[4] <- ci_lo
+    names(ia_print)[5] <- ci_hi
+    print(ia_print, row.names = FALSE, right = TRUE)
+    cat("\n")
+  }
+
+  if (!is.null(x$indirect_per_donor) && nrow(x$indirect_per_donor) > 0) {
+    n_show <- min(max_donors, nrow(x$indirect_per_donor))
+    cat(sprintf(
+      "Per-donor indirect effect (top %d by |posterior mean|, averaged across post-periods)\n",
+      n_show
+    ))
+    pd <- utils::head(x$indirect_per_donor, n_show)
+    pd_print <- data.frame(
+      donor = pd$donor,
+      mean  = formatC(pd$mean,  digits = digits, format = "f"),
+      sd    = formatC(pd$sd,    digits = digits, format = "f"),
+      lower = formatC(pd$lower, digits = digits, format = "f"),
+      upper = formatC(pd$upper, digits = digits, format = "f"),
+      `Pr>0`= formatC(pd$p_pos, digits = 3, format = "f"),
+      check.names = FALSE,
+      stringsAsFactors = FALSE
+    )
+    names(pd_print)[1] <- "Donor"
+    names(pd_print)[2] <- "Estimate"
+    names(pd_print)[3] <- "Est.Error"
+    names(pd_print)[4] <- ci_lo
+    names(pd_print)[5] <- ci_hi
+    print(pd_print, row.names = FALSE, right = TRUE)
+    if (nrow(x$indirect_per_donor) > n_show) {
+      cat(sprintf("  ... %d more donors not shown\n",
+                  nrow(x$indirect_per_donor) - n_show))
+    }
+    cat("\n")
+  }
 
   # Model parameters
   if (!is.null(x$parameters) && nrow(x$parameters) > 0) {
@@ -826,5 +959,131 @@ summary.nascSynth <- function(object, ...) {
     s_mat       = s_mat,
     W_full      = W_full,
     rhos_used   = rhos_per_draw
+  )
+}
+
+
+# ----------------------------------------------------------------------------
+# Internal: posterior draws of the indirect (spillover) treatment effect.
+#
+# By Proposition 6.2 of the proposal, the per-donor spillover at post-period
+# t is
+#     delta_{i,t}^NASC = s_i / (1 - gamma' s) * tau^SC_{1t}
+#                      = s_i * tau^NASC_{1t},
+# i.e. the same multiplicative factor s applied to the (bias-corrected) direct
+# effect. We reconstruct tau draws here exactly as `.nasc_summary_stats()` and
+# `$tauPlot()` do, then multiply by the per-draw contamination vector s to
+# obtain the [n_draws x T_post x J] tensor of donor-by-period spillover
+# draws.
+#
+# We also return the period-totals delta_t^total = sum_i delta_{i,t} and the
+# per-donor average across post-periods, which are the natural scalars to
+# summarize and plot.
+#
+# Returns NULL when the model is configured without a network (uses_rho =
+# FALSE) -- callers should treat this as "indirect effect not defined".
+# ----------------------------------------------------------------------------
+.nasc_indirect_draws <- function(model) {
+
+  if (!inherits(model, "nascSynth")) {
+    stop("'model' must be a fitted nascSynth object.")
+  }
+  priv <- model$.__enclos_env__$private
+  if (is.null(priv$y_synth_draws)) {
+    stop("Run $fit() before requesting indirect-effect draws.")
+  }
+  if (!isTRUE(priv$uses_rho) || is.null(priv$W)) {
+    # No network in use -> spillover is identically zero. Returning NULL
+    # lets callers cleanly degrade (skip indirect panels in plots, omit
+    # indirect blocks from summary output) rather than emit zero-valued
+    # noise.
+    return(NULL)
+  }
+
+  bits <- .nasc_contamination_draws(model)
+  s_mat       <- bits$s_mat            # [n_draws x J]
+  donor_names <- bits$donor_names
+
+  # Reconstruct tau draws exactly as in .nasc_summary_stats() / tauPlot().
+  ycf <- priv$y_synth_draws$y_counterfactual
+  bc  <- priv$y_synth_draws$bias_correction
+  if (is.null(bc)) bc <- rep(1, ncol(ycf))
+
+  wide_df <- .makeWide(
+    data      = priv$data,
+    id        = priv$id,
+    time      = priv$time,
+    outcome   = priv$outcome,
+    treatment = priv$treated
+  )
+  post_data <- wide_df |>
+    dplyr::filter(!!priv$time >= priv$intervention)
+  Y1_post   <- post_data[[rlang::as_name(priv$outcome)]]
+  time_post <- post_data[[rlang::as_name(priv$time)]]
+
+  Y1_mat <- matrix(Y1_post, nrow = nrow(ycf), ncol = length(Y1_post),
+                   byrow = TRUE)
+  bc_mat <- matrix(as.numeric(bc), nrow = nrow(ycf), ncol = ncol(ycf),
+                   byrow = FALSE)
+  tau_draws <- (Y1_mat - ycf) * bc_mat   # [n_draws x T_post]
+
+  if (nrow(tau_draws) != nrow(s_mat)) {
+    # Should never happen -- both are aligned on Step-2 posterior draws --
+    # but if it does, surfacing a clear error beats producing nonsense.
+    stop("Internal: tau_draws (", nrow(tau_draws),
+         " draws) and s_mat (", nrow(s_mat),
+         " draws) are misaligned; cannot compute indirect effect.")
+  }
+
+  n_draws <- nrow(tau_draws)
+  T_post  <- ncol(tau_draws)
+  J       <- ncol(s_mat)
+
+  # 3D tensor: delta[d, t, i] = s_mat[d, i] * tau_draws[d, t].
+  # Implementation: outer product per draw via rep + multiplication; an
+  # explicit loop over draws is simpler and just as fast at the sizes we
+  # see in practice (n_draws on the order of 10^3 - 10^4, T_post and J
+  # both small).
+  delta_arr <- array(NA_real_, dim = c(n_draws, T_post, J),
+                     dimnames = list(NULL, NULL, donor_names))
+  for (d in seq_len(n_draws)) {
+    delta_arr[d, , ] <- tcrossprod(tau_draws[d, ], s_mat[d, ])
+  }
+
+  # Period totals: sum across donors for each (draw, period). Equivalent
+  # to tau_draws[d, t] * sum(s_mat[d, ]).
+  delta_total <- tau_draws * matrix(rowSums(s_mat),
+                                    nrow = n_draws, ncol = T_post,
+                                    byrow = FALSE)
+
+  # Average across post-periods, draw by draw -> [n_draws x J] matrix of
+  # per-donor "average indirect effect" (analog of ATT for spillovers).
+  if (T_post == 1L) {
+    avg_per_donor <- matrix(delta_arr[, 1, ], nrow = n_draws, ncol = J,
+                            dimnames = list(NULL, donor_names))
+  } else {
+    # apply(., c(1, 3), mean) collapses dimension 2 (time).
+    avg_per_donor <- apply(delta_arr, c(1L, 3L), mean)
+    if (!is.matrix(avg_per_donor)) {
+      avg_per_donor <- matrix(avg_per_donor, nrow = n_draws, ncol = J)
+    }
+    colnames(avg_per_donor) <- donor_names
+  }
+
+  # Average total indirect effect across post-periods (a single scalar
+  # per draw -- the spillover analog of ATT).
+  avg_total <- if (T_post == 1L) {
+    as.numeric(delta_total[, 1])
+  } else {
+    rowMeans(delta_total)
+  }
+
+  list(
+    donor_names    = donor_names,
+    time_post      = time_post,
+    delta_arr      = delta_arr,       # [n_draws x T_post x J]
+    delta_total    = delta_total,     # [n_draws x T_post] (sum over donors)
+    avg_per_donor  = avg_per_donor,   # [n_draws x J]
+    avg_total      = avg_total        # [n_draws]
   )
 }

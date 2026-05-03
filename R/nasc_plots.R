@@ -12,18 +12,25 @@
 #' @param show_ci Logical. If \code{TRUE}, adds shaded credible-interval bands
 #'   (\code{LB}, \code{UB}, \code{tau_LB}, \code{tau_UB}). Defaults to
 #'   \code{FALSE} because overlapping bands can be hard to read.
+#' @param indirect Logical or \code{NULL}. If \code{TRUE}, adds a third
+#'   comparison plot of the per-period total indirect (spillover) effect
+#'   for each model that uses a network (Proposition 6.2). Models without
+#'   a network contribute a flat zero line and a footnote in the legend.
+#'   When \code{NULL} (default), the indirect panel is shown if
+#'   \emph{any} supplied model uses a network, and skipped otherwise.
 #'
 #' @details
-#' Draws plots directly to the active graphics device using base R. Two plots
-#' are produced in sequence (synthetic, then effect). Use
-#' \code{par(mfrow = c(1, 2))} or \code{dev.new()} between calls if you want
+#' Draws plots directly to the active graphics device using base R. Two or
+#' three plots are produced in sequence (synthetic, then direct effect,
+#' then -- if \code{indirect} -- total indirect effect). Use
+#' \code{par(mfrow = c(1, 3))} or \code{dev.new()} between calls if you want
 #' them side by side or in separate windows.
 #'
 #' @return Invisibly returns \code{NULL}. Called for its side effect of
 #'   drawing plots.
 #'
 #' @export
-nascPlot <- function(models, show_ci = FALSE) {
+nascPlot <- function(models, show_ci = FALSE, indirect = NULL) {
 
   if (!is.list(models) || is.null(names(models))) {
     stop("'models' must be a named list of fitted nascSynth objects.")
@@ -104,7 +111,7 @@ nascPlot <- function(models, show_ci = FALSE) {
                    box.col = "gray70")
 
   # ---------------------------------------------------------------
-  # Plot 2: Treatment effect (tau)
+  # Plot 2: Direct treatment effect (tau)
   # ---------------------------------------------------------------
   y_vals2 <- unlist(lapply(combined_list, function(d) d$tau))
   if (isTRUE(show_ci)) {
@@ -115,7 +122,7 @@ nascPlot <- function(models, show_ci = FALSE) {
 
   plot(combined_list[[1]]$time_var, combined_list[[1]]$tau, type = "n",
        xlim = xrng, ylim = yrng2,
-       xlab = "time", ylab = "tau")
+       xlab = "time", ylab = "tau (direct)")
   graphics::grid(lty = "dotted", col = "gray80")
 
   if (isTRUE(show_ci)) {
@@ -142,6 +149,99 @@ nascPlot <- function(models, show_ci = FALSE) {
                    bg     = grDevices::adjustcolor("white", alpha.f = 0.85),
                    box.col = "gray70")
 
+  # ---------------------------------------------------------------
+  # Plot 3: Indirect (spillover) effect
+  #
+  # For each model that uses a network we compute, for each post-period,
+  # mean and (optionally) credible-interval bounds of the total
+  # spillover delta_t^total = sum_i delta_{i,t}^{NASC}. Pre-treatment
+  # periods are zero by construction; we plot only the post-treatment
+  # window. Models without a network are skipped from the plot but
+  # listed in the legend with a "(no network)" marker so the user knows
+  # why their line is missing.
+  # ---------------------------------------------------------------
+  # Pull each model's indirectEffect() output once. Cheap (no resampling),
+  # and lets us decide whether to draw the indirect panel at all.
+  ind_list <- lapply(seq_along(models), function(i) {
+    mod <- models[[i]]
+    out <- tryCatch(mod$indirectEffect(), error = function(e) NULL)
+    out
+  })
+  any_indirect <- any(!vapply(ind_list, is.null, logical(1)))
+
+  if (is.null(indirect)) indirect <- any_indirect
+  stopifnot(is.logical(indirect), length(indirect) == 1L)
+
+  if (indirect) {
+    if (!any_indirect) {
+      message("No supplied model uses a network; skipping indirect-effect panel.")
+    } else {
+
+      # Pre-compute per-model summaries: time_var (post-period), mean,
+      # LB, UB. Models without a network contribute NULL.
+      ind_summary <- lapply(seq_along(models), function(i) {
+        bits <- ind_list[[i]]
+        if (is.null(bits)) return(NULL)
+        ci <- models[[i]]$.__enclos_env__$private$ci_width
+        probs <- c((1 - ci) / 2, 1 - (1 - ci) / 2)
+        delta_total <- bits$delta_total
+        list(
+          time_var = bits$time_post,
+          mean     = apply(delta_total, 2, mean),
+          LB       = apply(delta_total, 2, function(z) stats::quantile(z, probs[1], names = FALSE)),
+          UB       = apply(delta_total, 2, function(z) stats::quantile(z, probs[2], names = FALSE))
+        )
+      })
+
+      # Y-range across all available indirect series, optionally with
+      # CI bands.
+      y_vals3 <- unlist(lapply(ind_summary, function(d) if (is.null(d)) NULL else d$mean))
+      if (isTRUE(show_ci)) {
+        y_vals3 <- c(y_vals3,
+                     unlist(lapply(ind_summary, function(d) {
+                       if (is.null(d)) NULL else c(d$LB, d$UB)
+                     })))
+      }
+      yrng3 <- range(c(y_vals3, 0), na.rm = TRUE)
+
+      # X-range matches the synthetic/direct panels for visual alignment.
+      plot(NA, type = "n",
+           xlim = xrng, ylim = yrng3,
+           xlab = "time",
+           ylab = expression(delta ~ "(indirect, total)"))
+      graphics::grid(lty = "dotted", col = "gray80")
+
+      if (isTRUE(show_ci)) {
+        for (i in seq_len(n_models)) {
+          d <- ind_summary[[i]]
+          if (is.null(d)) next
+          graphics::polygon(c(d$time_var, rev(d$time_var)),
+                            c(d$LB, rev(d$UB)),
+                            col = grDevices::adjustcolor(cols[i], alpha.f = 0.15),
+                            border = NA)
+        }
+      }
+      for (i in seq_len(n_models)) {
+        d <- ind_summary[[i]]
+        if (is.null(d)) next
+        graphics::lines(d$time_var, d$mean, col = cols[i], lwd = 2)
+      }
+      graphics::abline(h = 0, lty = 1, col = "black")
+      graphics::abline(v = intervention_time, lty = 3, col = "gray40")
+
+      legend_labs <- names(models)
+      no_net_idx  <- which(vapply(ind_summary, is.null, logical(1)))
+      legend_labs[no_net_idx] <- paste0(legend_labs[no_net_idx], " (no network)")
+
+      graphics::legend("topleft",
+                       legend = legend_labs,
+                       col    = cols,
+                       lty    = 1, lwd = 2,
+                       bg     = grDevices::adjustcolor("white", alpha.f = 0.85),
+                       box.col = "gray70")
+    }
+  }
+
   invisible(NULL)
 }
 
@@ -158,11 +258,14 @@ nascPlot <- function(models, show_ci = FALSE) {
 #' glance.
 #'
 #' @details
-#' Donors are listed on the y-axis sorted by their mean posterior weight
-#' across the supplied models (heaviest at the top). When models use
-#' different donor pools, the union of donors is shown; a model that
-#' does not include a particular donor simply has no density drawn in
-#' that row.
+#' Donors are listed on the y-axis ordered by donor identifier, with
+#' the largest ID at the top and the smallest at the bottom. Numeric
+#' identifiers (or numeric-as-character such as \code{"1"}, \code{"2"},
+#' ..., \code{"20"}) are sorted numerically so \code{"20"} sits above
+#' \code{"3"}; otherwise the sort falls back to lexicographic order.
+#' When models use different donor pools, the union of donors is shown
+#' and a model that does not include a particular donor simply has no
+#' density drawn in that row.
 #'
 #' @param models A named list of fitted \code{nascSynth} objects. The
 #'   list names are used as legend labels and must be unique.
@@ -176,21 +279,22 @@ nascPlot <- function(models, show_ci = FALSE) {
 #'   fill colours; lower values make overlapping model ridges more
 #'   transparent. Default \code{0.45}, calibrated for readable overlap
 #'   at 2-4 models.
-#' @param max_donors Integer or \code{NULL}. If a positive integer, only
-#'   the \code{max_donors} donors with the largest aggregate mean weight
-#'   are plotted. Useful when the donor pool is large and only the
-#'   leading contributors matter. Default \code{NULL} (plot all donors).
+#' @param max_donors Integer or \code{NULL}. If a positive integer,
+#'   restrict the plot to the \code{max_donors} donors with the
+#'   largest IDs (i.e. drop the smallest IDs from the bottom of the
+#'   plot). Default \code{NULL} (plot all donors).
 #'
 #' @return Invisibly returns a tibble with one row per (donor, model)
-#'   combination giving the posterior mean weight and the share of
-#'   draws above \code{1e-3}. Sorted by aggregate descending mean.
+#'   combination giving the posterior mean weight, standard deviation,
+#'   and the share of draws above \code{1e-3}. Rows are ordered to
+#'   match the plot, top-to-bottom (largest donor ID first).
 #'
 #' @export
 nascWeight <- function(models,
-                          overlap     = 0.5,
-                          scale       = 1.4,
-                          fill_alpha  = 0.45,
-                          max_donors  = NULL) {
+                       overlap     = 0.5,
+                       scale       = 1.4,
+                       fill_alpha  = 0.45,
+                       max_donors  = NULL) {
 
   # ---- input validation ---------------------------------------------
   if (!is.list(models) || is.null(names(models)) || any(names(models) == "")) {
@@ -246,26 +350,33 @@ nascWeight <- function(models,
     list(name = m_name, w_mat = w_mat, donors = donor_ids)
   })
 
-  # ---- aggregate donor ordering: union sorted by mean weight --------
+  # ---- donor ordering: by donor ID, largest at top ------------------
+  # Donors are listed on the y-axis in the order in which they appear
+  # in the union of model donor pools, sorted so that the largest ID
+  # ends up at the TOP of the plot (highest baseline). When IDs are
+  # numeric (or numeric-as-character, e.g. "1", "2", ..., "20") we
+  # sort numerically so "20" sits above "3"; otherwise we fall back to
+  # lexicographic order on as.character().
   all_donors <- unique(unlist(lapply(per_model, `[[`, "donors")))
 
-  # Per-donor aggregate score = mean of per-model means (donors absent
-  # in a model get 0 there, which correctly downweights donors that
-  # only appear in one configuration).
-  donor_score <- vapply(all_donors, function(donor) {
-    vals <- vapply(per_model, function(pm) {
-      if (donor %in% pm$donors) mean(pm$w_mat[, donor]) else 0
-    }, numeric(1))
-    mean(vals)
-  }, numeric(1))
-
-  donor_order <- all_donors[order(donor_score, decreasing = TRUE)]
-  if (!is.null(max_donors) && length(donor_order) > max_donors) {
-    donor_order <- donor_order[seq_len(max_donors)]
+  num_attempt <- suppressWarnings(as.numeric(all_donors))
+  if (!any(is.na(num_attempt))) {
+    donor_order <- all_donors[order(num_attempt, decreasing = FALSE)]
+  } else {
+    donor_order <- all_donors[order(as.character(all_donors), decreasing = FALSE)]
   }
-  # Reverse for plotting: largest weight at TOP of plot. We assign
-  # baseline = step * i with i = 1..n, so i = n must be the heaviest.
-  donor_plot <- rev(donor_order)
+
+  # `max_donors` keeps the LARGEST `max_donors` IDs (i.e. drops the
+  # smallest), preserving the "largest at top" intuition.
+  if (!is.null(max_donors) && length(donor_order) > max_donors) {
+    keep_n <- as.integer(max_donors)
+    donor_order <- donor_order[(length(donor_order) - keep_n + 1L):length(donor_order)]
+  }
+
+  # Plotting baseline `step * i` with i = 1..n places i = n at the TOP.
+  # `donor_order` is currently ascending, so the last element is the
+  # largest -- exactly the donor we want at i = n. Use it as-is.
+  donor_plot <- donor_order
   n_d <- length(donor_plot)
 
   if (n_d == 0L) {
@@ -351,8 +462,10 @@ nascWeight <- function(models,
                    cex     = 0.9)
 
   # ---- summary tibble for programmatic use ---------------------------
+  # Order rows from largest ID (top of plot) to smallest, matching the
+  # visual order so the tibble reads naturally alongside the figure.
   summary_rows <- list()
-  for (donor in donor_order) {  # in descending order, not reversed
+  for (donor in rev(donor_order)) {
     for (pm in per_model) {
       if (donor %in% pm$donors) {
         col <- pm$w_mat[, donor]
