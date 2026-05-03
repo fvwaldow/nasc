@@ -116,13 +116,7 @@ contaminationPlot <- function(model,
   v_shape <- ifelse(is_treated, "square", "circle")
   v_size  <- ifelse(is_treated, vertex_size * 1.2, vertex_size)
 
-  # Edge widths proportional to |W_ij|.
-  e_w <- abs(igraph::E(g)$weight)
-  if (length(e_w) > 0) {
-    e_width <- 0.3 + 3 * (e_w / max(e_w, na.rm = TRUE))
-  } else {
-    e_width <- 1
-  }
+  e_width <- 1
 
   if (is.null(layout)) layout <- igraph::layout_with_fr
 
@@ -409,13 +403,7 @@ effectGraph <- function(model,
     v_label[is_treated] <- sprintf("%s\nATT=%s", treated_id, fmt(att_mean))
   }
 
-  # Edge widths proportional to |W_ij|.
-  e_w <- abs(igraph::E(g)$weight)
-  if (length(e_w) > 0) {
-    e_width <- 0.3 + 3 * (e_w / max(e_w, na.rm = TRUE))
-  } else {
-    e_width <- 1
-  }
+  e_width <- 1
 
   if (is.null(layout)) layout <- igraph::layout_with_fr
 

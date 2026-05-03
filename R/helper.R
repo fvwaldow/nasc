@@ -158,12 +158,7 @@
   if (is.null(y_counterfactual_draws) ||
       !is.matrix(y_counterfactual_draws) ||
       nrow(y_counterfactual_draws) == 0L) {
-    stop("Step 2 produced no posterior draws (likely all workers failed to ",
-         "create the sampler). Check that base_data dimensions match the ",
-         "Stan declarations -- in particular that Y1_post is wrapped in ",
-         "as.array() so a length-1 post-treatment period serializes as a ",
-         "vector and not a scalar -- and that all rho draws stay strictly ",
-         "inside (-1, 1).")
+    stop("Step 2 produced no posterior draws")
   }
 
   post_times <- post_data |> dplyr::pull(!!time)
@@ -201,9 +196,7 @@
       "y_sim_pre_draws has %d columns but pre_data has %d rows. ",
       ncol(y_sim_pre_draws), length(pre_times)
     ),
-    "If covariates were supplied, y_sim_pre may include rows from the ",
-    "Abadie-style predictor matching stack and needs to be trimmed to ",
-    "real pre-treatment periods before post-processing.")
+    "")
   }
 
   pre_summary <- tibble::tibble(
@@ -423,9 +416,7 @@
   # the long data isn't sorted by id.
   donor_ids <- parts$donor_ids
   if (is.null(donor_ids)) {
-    warning("parts$donor_ids missing (older fitted object?); falling back ",
-            "to factor-level ordering. Donor labels in the weights table ",
-            "may be misaligned for fits produced before this fix.")
+    warning("parts$donor_ids missing")
     all_ids   <- levels(parts$id_levels)
     donor_ids <- setdiff(all_ids, treated_id)
   }
@@ -555,12 +546,21 @@
 #'
 #' @param x A \code{summary.nascSynth} object.
 #' @param digits Number of significant digits to display. Default \code{3}.
-#' @param max_donors Maximum number of donor weights to display.
-#'   Default \code{10}.
+#' @param max_donors Maximum number of donor weights and per-donor indirect
+#'   effects to display. Defaults to \code{Inf}, which shows ALL donors. Pass
+#'   a finite integer (e.g. \code{10}) to restrict the output to the top
+#'   donors by posterior mean (for the weights table) or by absolute
+#'   posterior mean (for the per-donor indirect effects table). Also accepts
+#'   \code{NULL} as an alias for "show all".
 #' @param ... Additional arguments (ignored).
 #' @return Invisibly returns \code{x}.
 #' @export
-print.summary.nascSynth <- function(x, digits = 3, max_donors = 10, ...) {
+print.summary.nascSynth <- function(x, digits = 3, max_donors = Inf, ...) {
+  # Allow NULL as a synonym for "show all"; coerce to Inf so the same
+  # min(max_donors, nrow(.)) logic works for both bounded and unbounded
+  # requests without needing branching everywhere below.
+  if (is.null(max_donors)) max_donors <- Inf
+
   h <- x$header
   cat("Network-Aware Synthetic Control\n")
   cat("\n")
@@ -583,7 +583,7 @@ print.summary.nascSynth <- function(x, digits = 3, max_donors = 10, ...) {
 
   # Per-period TE (direct effect)
   has_indirect <- !is.null(x$indirect_per_period)
-  cat(if (has_indirect) "Per-period direct effect\n" else "Per-period TE\n")
+  cat(if (has_indirect) "Per-period Direct Treatment Effect\n" else "Per-period Treatment Effect\n")
   pp <- x$per_period
   pp_print <- data.frame(
     period = format(pp[[h$time]]),
@@ -606,7 +606,7 @@ print.summary.nascSynth <- function(x, digits = 3, max_donors = 10, ...) {
   # ATT (direct)
   att <- x$att
   att_p_dir <- if (att["mean"] >= 0) att["p_pos"] else 1 - att["p_pos"]
-  cat(if (has_indirect) "ATT (direct effect)\n" else "ATT\n")
+  cat(if (has_indirect) "Average direct Treatment Effect \n" else "Average Treatment Effect\n")
   att_print <- data.frame(
     blank   = "",
     mean    = formatC(att["mean"],  digits = digits, format = "f"),
@@ -632,10 +632,11 @@ print.summary.nascSynth <- function(x, digits = 3, max_donors = 10, ...) {
   # (which itself is gated on uses_rho = TRUE in .nasc_summary_stats):
   #   1. Per-period total spillover  -- sum over donors per t
   #   2. Average total spillover     -- analog of ATT for spillovers
-  #   3. Per-donor average spillover -- top contributors over post period
+  #   3. Per-donor average spillover -- ALL donors by default (or top-N
+  #      if the user passes a finite max_donors)
   # ----------------------------------------------------------------
   if (!is.null(x$indirect_per_period)) {
-    cat("Per-period indirect effect (total spillover, summed across donors)\n")
+    cat("Per-period total indirect Treatment Effect (summed across donors)\n")
     ip <- x$indirect_per_period
     ip_print <- data.frame(
       period = format(ip[[h$time]]),
@@ -659,7 +660,7 @@ print.summary.nascSynth <- function(x, digits = 3, max_donors = 10, ...) {
   if (!is.null(x$indirect_avg)) {
     ia <- x$indirect_avg
     ia_p_dir <- if (ia["mean"] >= 0) ia["p_pos"] else 1 - ia["p_pos"]
-    cat("Average indirect effect (total spillover, averaged across post-periods)\n")
+    cat("Average total indirect Tratment Effect (averaged across post-periods)\n")
     ia_print <- data.frame(
       blank  = "",
       mean   = formatC(ia["mean"],  digits = digits, format = "f"),
@@ -680,11 +681,19 @@ print.summary.nascSynth <- function(x, digits = 3, max_donors = 10, ...) {
   }
 
   if (!is.null(x$indirect_per_donor) && nrow(x$indirect_per_donor) > 0) {
-    n_show <- min(max_donors, nrow(x$indirect_per_donor))
-    cat(sprintf(
-      "Per-donor indirect effect (top %d by |posterior mean|, averaged across post-periods)\n",
-      n_show
-    ))
+    n_total <- nrow(x$indirect_per_donor)
+    n_show  <- min(max_donors, n_total)
+    if (is.infinite(max_donors) || n_show >= n_total) {
+      cat(sprintf(
+        "Per-donor indirect effect (all %d donors, sorted by |posterior mean|, averaged across post-periods)\n",
+        n_total
+      ))
+    } else {
+      cat(sprintf(
+        "Per-donor indirect effect (top %d of %d by |posterior mean|, averaged across post-periods)\n",
+        n_show, n_total
+      ))
+    }
     pd <- utils::head(x$indirect_per_donor, n_show)
     pd_print <- data.frame(
       donor = pd$donor,
@@ -701,10 +710,11 @@ print.summary.nascSynth <- function(x, digits = 3, max_donors = 10, ...) {
     names(pd_print)[3] <- "Est.Error"
     names(pd_print)[4] <- ci_lo
     names(pd_print)[5] <- ci_hi
-    print(pd_print, row.names = FALSE, right = TRUE)
-    if (nrow(x$indirect_per_donor) > n_show) {
-      cat(sprintf("  ... %d more donors not shown\n",
-                  nrow(x$indirect_per_donor) - n_show))
+    # max = Inf disables the row-count truncation print() applies to long
+    # data.frames, so all donors are actually rendered.
+    print(pd_print, row.names = FALSE, right = TRUE, max = .Machine$integer.max)
+    if (n_total > n_show) {
+      cat(sprintf("  ... %d more donors not shown\n", n_total - n_show))
     }
     cat("\n")
   }
@@ -745,10 +755,17 @@ print.summary.nascSynth <- function(x, digits = 3, max_donors = 10, ...) {
               else formatC(x$rmspe_ratio, digits = digits, format = "f")))
   cat("\n")
 
-  # Donor weights
-  cat(sprintf("Donor weights (top %d by posterior mean)\n",
-              min(max_donors, nrow(x$weights))))
-  w <- utils::head(x$weights, max_donors)
+  # Donor weights -- show all by default, or top-N when max_donors finite.
+  n_w_total <- nrow(x$weights)
+  n_w_show  <- min(max_donors, n_w_total)
+  if (is.infinite(max_donors) || n_w_show >= n_w_total) {
+    cat(sprintf("Donor weights (all %d donors, sorted by posterior mean)\n",
+                n_w_total))
+  } else {
+    cat(sprintf("Donor weights (top %d of %d by posterior mean)\n",
+                n_w_show, n_w_total))
+  }
+  w <- utils::head(x$weights, n_w_show)
   w_print <- data.frame(
     donor = w$donor,
     mean  = formatC(w$mean,  digits = digits, format = "f"),
@@ -762,10 +779,10 @@ print.summary.nascSynth <- function(x, digits = 3, max_donors = 10, ...) {
   names(w_print)[3] <- "Est.Error"
   names(w_print)[4] <- ci_lo
   names(w_print)[5] <- ci_hi
-  print(w_print, row.names = FALSE, right = TRUE)
-  if (nrow(x$weights) > max_donors) {
-    cat(sprintf("  ... %d more donors not shown\n",
-                nrow(x$weights) - max_donors))
+  # See note above on max = .Machine$integer.max.
+  print(w_print, row.names = FALSE, right = TRUE, max = .Machine$integer.max)
+  if (n_w_total > n_w_show) {
+    cat(sprintf("  ... %d more donors not shown\n", n_w_total - n_w_show))
   }
   cat("\n")
 
