@@ -73,7 +73,7 @@ nascPlot <- function(models, show_ci = FALSE) {
 
   plot(obs_df$time_var, obs_df$outcome_var, type = "n",
        xlim = xrng, ylim = yrng,
-       xlab = "time", ylab = "value")
+       xlab = "time", ylab = "Y")
   graphics::grid(lty = "dotted", col = "gray80")
 
   if (isTRUE(show_ci)) {
@@ -115,7 +115,7 @@ nascPlot <- function(models, show_ci = FALSE) {
 
   plot(combined_list[[1]]$time_var, combined_list[[1]]$tau, type = "n",
        xlim = xrng, ylim = yrng2,
-       xlab = "time", ylab = "tau (direct)")
+       xlab = "time", ylab = "effect")
   graphics::grid(lty = "dotted", col = "gray80")
 
   if (isTRUE(show_ci)) {

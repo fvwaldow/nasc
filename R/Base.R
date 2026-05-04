@@ -1336,9 +1336,9 @@ nascSynth <- R6::R6Class(
 
       # Column headings in the outer top margin
       if (indirect) {
-        graphics::mtext("Direct effect", side = 3, outer = TRUE,
+        graphics::mtext(expression(bold(tau) ~ "(direct)"), side = 3, outer = TRUE,
                         at = 0.25, line = 0.6, font = 2)
-        graphics::mtext("Indirect effect (donor-avg)", side = 3, outer = TRUE,
+        graphics::mtext(expression(bold(bar(delta)) ~ "(indirect, donor-avg)"), side = 3, outer = TRUE,
                         at = 0.75, line = 0.6, font = 2)
       } else {
         graphics::mtext("",

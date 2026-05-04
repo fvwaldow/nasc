@@ -685,7 +685,7 @@ print.summary.nascSynth <- function(x, digits = 3, ...) {
     ia_p_dir <- if (ia["mean"] >= 0) ia["p_pos"] else 1 - ia["p_pos"]
     cat("Average indirect Treatment Effect (averaged across donors and post-periods)\n")
     ia_print <- data.frame(
-      blank  = "",
+      blank  = " ",
       mean   = formatC(ia["mean"],  digits = digits, format = "f"),
       sd     = formatC(ia["sd"],    digits = digits, format = "f"),
       lower  = formatC(ia["lower"], digits = digits, format = "f"),
@@ -694,7 +694,7 @@ print.summary.nascSynth <- function(x, digits = 3, ...) {
       check.names = FALSE,
       stringsAsFactors = FALSE
     )
-    names(ia_print)[1] <- ""
+    names(ia_print)[1] <- " "
     names(ia_print)[2] <- "Estimate"
     names(ia_print)[3] <- "Est.Error"
     names(ia_print)[4] <- ci_lo
