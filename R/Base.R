@@ -868,123 +868,30 @@ nascSynth <- R6::R6Class(
 
     #' @description
     #' Plot the estimated direct treatment effect (\eqn{\tau_{1t}}) over
-    #' time. When the model uses a network and \code{indirect = TRUE} (the
-    #' default in that case), the per-period donor-AVERAGE indirect
-    #' (spillover) effect
-    #' \eqn{\bar\delta_t = (1/J)\sum_i \delta_{i,t}^{NASC}} is overlaid on
-    #' the same panel as a second line, with its own credible-interval
-    #' band. Pre-treatment is omitted for the indirect line (spillover is
-    #' identically zero by construction before intervention). Set
-    #' \code{indirect = FALSE} to suppress the overlay.
+    #' time. The indirect effect overlay has been removed for simplicity.
     #'
-    #' @param indirect Logical or \code{NULL}. When \code{NULL} (default),
-    #'   the indirect overlay is shown iff \code{uses_rho = TRUE}.
+    #' @param indirect Ignored. Kept in the signature so existing scripts
+    #'   calling `effectPlot(indirect = ...)` don't break, but no indirect
+    #'   line will be drawn.
     effectPlot = function(indirect = NULL) {
-      indirect_default <- isTRUE(private$uses_rho)
-      if (is.null(indirect)) indirect <- indirect_default
-      stopifnot(is.logical(indirect), length(indirect) == 1L)
 
+      # Ensure fit has been run
+      if (is.null(private$plot_data)) {
+        stop("Run $fit() before calling effectPlot().")
+      }
+
+      # Get the name of the time variable
       time_name <- rlang::as_name(private$time)
 
-      # Direct effect: as before, from plot_data.
-      if (indirect) {
-        # Try to compute indirect-effect time series. If unavailable
-        # (e.g. uses_rho = FALSE), fall back to single-line layout.
-        ind <- tryCatch(.nasc_indirect_draws(self), error = function(e) NULL)
-        if (is.null(ind)) {
-          if (indirect_default) {
-            warning("Indirect-effect draws unavailable; drawing direct effect only.")
-          }
-          indirect <- FALSE
-        }
-      }
-
-      if (!indirect) {
-        # Original single-line direct-effect plot.
-        .plot_tau(
-          data       = private$plot_data,
-          x          = time_name,
-          y          = "tau",
-          ymin       = "tau_LB",
-          ymax       = "tau_UB",
-          xintercept = private$intervention
-        )
-        return(invisible(NULL))
-      }
-
-      # ---- Single-panel overlay: direct + donor-average indirect ----
-      ci    <- private$ci_width
-      probs <- .ci_probs(ci)
-
-      # Donor-average per-period spillover. delta_total[d, t] is the
-      # SUM across donors at period t; dividing by J turns it into the
-      # donor-average, which is the quantity reported in the summary.
-      # We rebuild draws so the credible-interval band reflects the
-      # posterior of the AVERAGE (just rescaling by 1/J vs the total
-      # gives the same band geometry up to that scalar, but doing it
-      # via per-draw division keeps the code symmetric with the
-      # summary helper).
-      J <- length(ind$donor_names)
-      delta_avg_draws <- ind$delta_total / J
-      ind_summary <- tibble::tibble(
-        !!time_name := ind$time_post,
-        delta    = apply(delta_avg_draws, 2, mean),
-        delta_LB = apply(delta_avg_draws, 2, \(z) stats::quantile(z, probs[1], names = FALSE)),
-        delta_UB = apply(delta_avg_draws, 2, \(z) stats::quantile(z, probs[2], names = FALSE))
+      # Rely entirely on the pre-built .plot_tau helper for the direct effect
+      .plot_tau(
+        data       = private$plot_data,
+        x          = time_name,
+        y          = "tau",
+        ymin       = "tau_LB",
+        ymax       = "tau_UB",
+        xintercept = private$intervention
       )
-
-      # Direct-effect series from plot_data (covers full pre+post window).
-      pd <- as.data.frame(private$plot_data)
-      pd <- pd[order(pd[[time_name]]), , drop = FALSE]
-      xv  <- pd[[time_name]]
-      yv  <- pd$tau
-      lbv <- pd$tau_LB
-      ubv <- pd$tau_UB
-
-      # Indirect-effect series: post-window only (spillover is
-      # identically zero pre-intervention by construction).
-      xv2 <- ind_summary[[time_name]]
-      yv2 <- ind_summary$delta
-      lb2 <- ind_summary$delta_LB
-      ub2 <- ind_summary$delta_UB
-
-      # Joint y-range covers both series' lines and bands so neither
-      # gets clipped on the overlay. Includes 0 so the reference line
-      # is always visible.
-      yrng <- range(c(yv, lbv, ubv, yv2, lb2, ub2, 0), na.rm = TRUE)
-
-      op <- graphics::par(no.readonly = TRUE)
-      on.exit(graphics::par(op))
-      graphics::par(mar = c(4, 5, 2, 1), bty = "l")
-
-      plot(xv, yv, type = "n", ylim = yrng,
-           xlab = time_name, ylab = "effect")
-      graphics::grid(lty = "dotted", col = "gray80")
-
-      # Bands first (so lines render on top). Indirect band comes
-      # before direct band so when they overlap, direct -- the primary
-      # quantity -- dominates visually.
-      graphics::polygon(c(xv2, rev(xv2)), c(lb2, rev(ub2)),
-                        col = grDevices::adjustcolor("indianred", alpha.f = 0.15),
-                        border = NA)
-      graphics::polygon(c(xv, rev(xv)), c(lbv, rev(ubv)),
-                        col = grDevices::adjustcolor("steelblue", alpha.f = 0.15),
-                        border = NA)
-
-      # Lines on top of bands.
-      graphics::lines(xv, yv, lwd = 2, col = "steelblue4")
-      graphics::lines(xv2, yv2, lwd = 2, col = "indianred4")
-
-      graphics::abline(v = private$intervention, lty = 2)
-      graphics::abline(h = 0, lty = 1, col = "black")
-
-      graphics::legend("topleft",
-                       legend = c(expression(tau ~ "(direct)"),
-                                  expression(bar(delta) ~ "(indirect, donor-avg)")),
-                       col    = c("steelblue4", "indianred4"),
-                       lty    = 1, lwd = 2,
-                       bg     = grDevices::adjustcolor("white", alpha.f = 0.85),
-                       box.col = "gray70")
 
       invisible(NULL)
     },
@@ -1309,7 +1216,7 @@ nascSynth <- R6::R6Class(
         # Direct
         d_i <- dens_dir[[i]]
         plot(d_i,
-             main = paste0("Period ", time_post[i]),
+             main = paste0("Period ", time_post[i]), font.main = 1, cex.main = 1,
              xlab = if (is_last) expression(tau ~ "(direct)") else "",
              ylab = "density",
              xlim = xr_dir,
@@ -1322,7 +1229,7 @@ nascSynth <- R6::R6Class(
         if (indirect) {
           d_j <- dens_ind[[i]]
           plot(d_j,
-               main = paste0("Period ", time_post[i]),
+               main = paste0("Period ", time_post[i]), font.main = 1, cex.main = 1,
                xlab = if (is_last) expression(bar(delta) ~ "(indirect, donor-avg)") else "",
                ylab = "density",
                xlim = xr_ind,
