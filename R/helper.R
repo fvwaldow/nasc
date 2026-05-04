@@ -628,7 +628,7 @@ print.summary.nascSynth <- function(x, digits = 3, ...) {
   att_p_dir <- if (att["mean"] >= 0) att["p_pos"] else 1 - att["p_pos"]
   cat(if (has_indirect) "Average direct Treatment Effect \n" else "Average Treatment Effect\n")
   att_print <- data.frame(
-    blank   = "",
+    blank   = " ",
     mean    = formatC(att["mean"],  digits = digits, format = "f"),
     sd      = formatC(att["sd"],    digits = digits, format = "f"),
     lower   = formatC(att["lower"], digits = digits, format = "f"),
@@ -637,7 +637,7 @@ print.summary.nascSynth <- function(x, digits = 3, ...) {
     check.names = FALSE,
     stringsAsFactors = FALSE
   )
-  names(att_print)[1] <- ""
+  names(att_print)[1] <- " "
   names(att_print)[2] <- "Estimate"
   names(att_print)[3] <- "Est.Error"
   names(att_print)[4] <- ci_lo
@@ -704,11 +704,7 @@ print.summary.nascSynth <- function(x, digits = 3, ...) {
   }
 
   if (!is.null(x$indirect_per_donor) && nrow(x$indirect_per_donor) > 0) {
-    n_total <- nrow(x$indirect_per_donor)
-    cat(sprintf(
-      "Per-donor indirect effect (averaged across post-periods)\n",
-      n_total
-    ))
+    cat("Per-donor indirect effect (averaged across post-periods)\n")
     pd <- x$indirect_per_donor
     pd_print <- data.frame(
       donor = pd$donor,
@@ -769,9 +765,7 @@ print.summary.nascSynth <- function(x, digits = 3, ...) {
   cat("\n")
 
   # Donor weights -- always show every donor.
-  n_w_total <- nrow(x$weights)
-  cat(sprintf("Donor weights \n",
-              n_w_total))
+  cat("Donor weights \n")
   w <- x$weights
   w_print <- data.frame(
     donor = w$donor,

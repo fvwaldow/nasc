@@ -306,7 +306,7 @@ nascSynth <- R6::R6Class(
     #' @param worker_warmup Warmup per worker chain in the multi-rho parallel
     #'   loop. Default 1000.
     fit = function(n_samples = 100,
-                   n_samples_cap = 200L,
+                   n_samples_cap = 500L,
                    n_samples_min = 30L,
                    cores = parallel::detectCores() - 1,
                    worker_iter = 2000L, worker_warmup = 1000L, ...) {
