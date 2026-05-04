@@ -475,10 +475,9 @@
   # rho. Without rho, spillover is identically zero by construction and
   # we omit the indirect blocks rather than print zeros.
   # ----------------------------------------------------------------
-  indirect_per_period_total <- NULL  # period-total spillover (sum over donors)
+  indirect_per_period_avg   <- NULL  # per-period donor-average spillover
   indirect_per_donor        <- NULL  # average across periods, per donor
-  indirect_avg_total        <- NULL  # scalar: average total spillover (analog ATT)
-  indirect_cum_total        <- NULL  # scalar: cumulative total spillover (T_post * average)
+  indirect_avg              <- NULL  # scalar: average across periods of donor-average spillover
   if (isTRUE(parts$uses_rho) && !is.null(parts$model)) {
     ind <- tryCatch(
       .nasc_indirect_draws(parts$model),
@@ -487,44 +486,28 @@
     if (!is.null(ind)) {
       delta_total_draws <- ind$delta_total                  # [n_draws x T_post]
       avg_per_donor_dr  <- ind$avg_per_donor                # [n_draws x J]
-      avg_total_draws   <- ind$avg_total                    # [n_draws]
-      # Cumulative draws: per-draw sum across post-periods of the
-      # total-across-donors spillover. Identically T_post * avg_total
-      # per draw, but we compute it directly for clarity and so the
-      # CrI is built from the right per-draw object.
-      cum_total_draws   <- rowSums(delta_total_draws)       # [n_draws]
+      J                 <- ncol(avg_per_donor_dr)
 
-      # Per-draw running cumulative across post-periods of the total
-      # spillover. apply(., 1, cumsum) returns a [T_post x n_draws]
-      # matrix because cumsum produces a vector and apply binds them
-      # column-wise; transposing gets us back to the [n_draws x T_post]
-      # convention used elsewhere. Each column t then has the per-draw
-      # cumulative spillover up to and including period t, which is
-      # what the running-CrI is built from.
-      cum_running_draws <- t(apply(delta_total_draws, 1, cumsum))
-      # Edge case: when T_post == 1, apply(., 1, cumsum) collapses to a
-      # length-n_draws vector. Reshape to keep the [n_draws x 1] shape
-      # the column summaries below expect.
-      if (!is.matrix(cum_running_draws)) {
-        cum_running_draws <- matrix(cum_running_draws, ncol = 1L)
-      }
+      # Per-period donor-AVERAGE spillover (instead of donor-total):
+      #   delta_avg_t^(d) = (1/J) * sum_i delta_{i,t}^{NASC, (d)}
+      # We construct the [n_draws x T_post] matrix once and feed it
+      # into the column summaries below so the CrI reflects the
+      # posterior of the average directly.
+      delta_avg_draws <- delta_total_draws / J
 
-      indirect_per_period_total <- tibble::tibble(
-        !!time_nm  := ind$time_post,
-        mean       = apply(delta_total_draws, 2, mean),
-        sd         = apply(delta_total_draws, 2, stats::sd),
-        lower      = apply(delta_total_draws, 2, \(x) stats::quantile(x, .ci_probs(ci)[1], names = FALSE)),
-        upper      = apply(delta_total_draws, 2, \(x) stats::quantile(x, .ci_probs(ci)[2], names = FALSE)),
-        p_pos      = apply(delta_total_draws, 2, \(x) mean(x > 0)),
-        # Running cumulative columns. Same five summaries as the period
-        # totals, computed on cum_running_draws so the CrI reflects the
-        # cumulative posterior at each t (not a rescaling of the period
-        # CrI -- the two coincide only at t = T_post[1]).
-        cum_mean   = apply(cum_running_draws, 2, mean),
-        cum_sd     = apply(cum_running_draws, 2, stats::sd),
-        cum_lower  = apply(cum_running_draws, 2, \(x) stats::quantile(x, .ci_probs(ci)[1], names = FALSE)),
-        cum_upper  = apply(cum_running_draws, 2, \(x) stats::quantile(x, .ci_probs(ci)[2], names = FALSE)),
-        cum_p_pos  = apply(cum_running_draws, 2, \(x) mean(x > 0))
+      # Scalar "average indirect effect": per-draw average across
+      # post-periods of the donor-average spillover. Equivalently the
+      # per-draw average across BOTH dimensions (donors x time) of the
+      # full delta tensor, which is the spillover analog of the ATT.
+      avg_indirect_draws <- rowMeans(delta_avg_draws)         # [n_draws]
+
+      indirect_per_period_avg <- tibble::tibble(
+        !!time_nm := ind$time_post,
+        mean   = apply(delta_avg_draws, 2, mean),
+        sd     = apply(delta_avg_draws, 2, stats::sd),
+        lower  = apply(delta_avg_draws, 2, \(x) stats::quantile(x, .ci_probs(ci)[1], names = FALSE)),
+        upper  = apply(delta_avg_draws, 2, \(x) stats::quantile(x, .ci_probs(ci)[2], names = FALSE)),
+        p_pos  = apply(delta_avg_draws, 2, \(x) mean(x > 0))
       )
 
       indirect_per_donor <- tibble::tibble(
@@ -545,8 +528,7 @@
         rev(seq_len(nrow(indirect_per_donor))), , drop = FALSE
       ]
 
-      indirect_avg_total <- .posterior_summary(avg_total_draws, ci)
-      indirect_cum_total <- .posterior_summary(cum_total_draws, ci)
+      indirect_avg <- .posterior_summary(avg_indirect_draws, ci)
     }
   }
 
@@ -569,10 +551,9 @@
     att         = att,
     per_period  = per_period,
     # Indirect effect blocks: NULL when no rho is in use.
-    indirect_per_period = indirect_per_period_total,
+    indirect_per_period = indirect_per_period_avg,
     indirect_per_donor  = indirect_per_donor,
-    indirect_avg        = indirect_avg_total,
-    indirect_cum        = indirect_cum_total,
+    indirect_avg        = indirect_avg,
     pre_rmse    = pre_rmse,
     pre_r2      = pre_r2,
     post_rmse   = post_rmse,
@@ -667,21 +648,19 @@ print.summary.nascSynth <- function(x, digits = 3, ...) {
   # ----------------------------------------------------------------
   # Indirect (spillover) effects (Proposition 6.2).
   #
-  # Four blocks, all gated on x$indirect_per_period being non-NULL
+  # Three blocks, all gated on x$indirect_per_period being non-NULL
   # (which itself is gated on uses_rho = TRUE in .nasc_summary_stats):
-  #   1. Per-period total spillover -- sum over donors at each t,
-  #      printed alongside the running cumulative across post-periods
-  #      so flow and stock are visible together.
-  #   2. Average total spillover     -- analog of ATT for spillovers
-  #   3. Cumulative total spillover  -- single scalar, for flow outcomes
-  #   4. Per-donor average spillover -- every donor in the pool, sorted
-  #      by descending unit index in the canonical donor ordering
+  #   1. Per-period average spillover -- (1/J) sum_i delta_{i,t}, the
+  #      "typical donor's" spillover at each post-period t.
+  #   2. Average indirect effect      -- average of the per-period
+  #      donor-average across post-periods. Spillover analog of ATT.
+  #   3. Per-donor average spillover  -- every donor in the pool, sorted
+  #      by descending unit index in the canonical donor ordering.
   # ----------------------------------------------------------------
   if (!is.null(x$indirect_per_period)) {
     ip <- x$indirect_per_period
 
-    # Sub-table 1: per-period flow
-    cat("Per-period total indirect Treatment Effect (summed across donors)\n")
+    cat("Per-period average indirect Treatment Effect (averaged across donors)\n")
     ip_print <- data.frame(
       period = format(ip[[h$time]]),
       mean   = formatC(ip$mean,  digits = digits, format = "f"),
@@ -704,7 +683,7 @@ print.summary.nascSynth <- function(x, digits = 3, ...) {
   if (!is.null(x$indirect_avg)) {
     ia <- x$indirect_avg
     ia_p_dir <- if (ia["mean"] >= 0) ia["p_pos"] else 1 - ia["p_pos"]
-    cat("Average total indirect Treatment Effect (averaged across post-periods)\n")
+    cat("Average indirect Treatment Effect (averaged across donors and post-periods)\n")
     ia_print <- data.frame(
       blank  = "",
       mean   = formatC(ia["mean"],  digits = digits, format = "f"),
@@ -724,38 +703,10 @@ print.summary.nascSynth <- function(x, digits = 3, ...) {
     cat("\n")
   }
 
-  # Cumulative total spillover -- per-draw sum across post-periods.
-  # Useful when the outcome is a flow (GDP, emissions, deaths) where the
-  # accumulated spillover stock is the natural quantity of interest;
-  # printed alongside the average so readers can pick whichever framing
-  # fits the application without re-doing the arithmetic.
-  if (!is.null(x$indirect_cum)) {
-    ic <- x$indirect_cum
-    ic_p_dir <- if (ic["mean"] >= 0) ic["p_pos"] else 1 - ic["p_pos"]
-    cat("Cumulative total indirect Treatment Effect (summed across post-periods)\n")
-    ic_print <- data.frame(
-      blank  = "",
-      mean   = formatC(ic["mean"],  digits = digits, format = "f"),
-      sd     = formatC(ic["sd"],    digits = digits, format = "f"),
-      lower  = formatC(ic["lower"], digits = digits, format = "f"),
-      upper  = formatC(ic["upper"], digits = digits, format = "f"),
-      `Pr>0` = formatC(ic_p_dir,    digits = max(digits, 3), format = "f"),
-      check.names = FALSE,
-      stringsAsFactors = FALSE
-    )
-    names(ic_print)[1] <- ""
-    names(ic_print)[2] <- "Estimate"
-    names(ic_print)[3] <- "Est.Error"
-    names(ic_print)[4] <- ci_lo
-    names(ic_print)[5] <- ci_hi
-    print(ic_print, row.names = FALSE, right = TRUE)
-    cat("\n")
-  }
-
   if (!is.null(x$indirect_per_donor) && nrow(x$indirect_per_donor) > 0) {
     n_total <- nrow(x$indirect_per_donor)
     cat(sprintf(
-      "Per-donor average indirect effect (averaged across post-periods)\n",
+      "Per-donor indirect effect (averaged across post-periods)\n",
       n_total
     ))
     pd <- x$indirect_per_donor
@@ -819,7 +770,7 @@ print.summary.nascSynth <- function(x, digits = 3, ...) {
 
   # Donor weights -- always show every donor.
   n_w_total <- nrow(x$weights)
-  cat(sprintf("Donor weights (all %d donors, sorted by descending unit index)\n",
+  cat(sprintf("Donor weights \n",
               n_w_total))
   w <- x$weights
   w_print <- data.frame(

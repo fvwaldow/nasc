@@ -25,18 +25,25 @@
 #' @param label_cex Numeric scalar for label size. Default \code{0.8}.
 #' @param directed Logical. If \code{TRUE}, treats \eqn{W} as a directed
 #'   graph and draws arrows. Default \code{FALSE}.
+#' @param seed Integer or \code{NULL}. Seed used to make stochastic
+#'   layouts (e.g. \code{layout_with_fr}) reproducible across calls.
+#'   The seed is applied locally and the user's RNG state is restored
+#'   on exit. Set to \code{NULL} for the original stochastic behaviour.
+#'   Ignored when \code{layout} is a precomputed coordinate matrix.
+#'   Default \code{1L}.
 #'
 #' @return Invisibly returns a tibble with one row per donor giving the
 #'   posterior mean of \eqn{s_j} and \eqn{|s_j|}.
 #'
 #' @export
-contaminationPlot <- function(model,
-                              signed         = FALSE,
-                              edge_threshold = 1e-3,
-                              layout         = NULL,
-                              vertex_size    = 12,
-                              label_cex      = 0.8,
-                              directed       = FALSE) {
+contaminationGraph <- function(model,
+                               signed         = FALSE,
+                               edge_threshold = 1e-3,
+                               layout         = NULL,
+                               vertex_size    = 12,
+                               label_cex      = 0.8,
+                               directed       = FALSE,
+                               seed           = 1L) {
 
   if (!requireNamespace("igraph", quietly = TRUE)) {
     stop("Package 'igraph' is required for contaminationPlot(). ",
@@ -96,19 +103,45 @@ contaminationPlot <- function(model,
     v_score[!is.na(donor_match)] <- s_abs_mean[donor_match[!is.na(donor_match)]]
   }
 
-  # Map scores to colours.
+  # ----------------------------------------------------------------
+  # Map donor scores to colours. The range is set to the actual
+  # [min, max] of the donor scores (treated unit is excluded -- it is
+  # rendered in a flat grey marker), so the legend interval shrinks
+  # to what is really observed instead of being padded out
+  # symmetrically. For the signed palette we still anchor white at
+  # zero so the diverging colours retain their meaning; the bar
+  # end-points are the true min and max.
+  # ----------------------------------------------------------------
+  donor_score  <- v_score[!is_treated]
+  finite_donor <- donor_score[is.finite(donor_score)]
   if (signed) {
-    rng <- max(abs(v_score[!is_treated]), na.rm = TRUE)
-    rng <- if (is.finite(rng) && rng > 0) rng else 1
-    pal <- grDevices::colorRampPalette(c("#2166ac", "white", "#b2182b"))(101)
-    z   <- pmax(-1, pmin(1, v_score / rng))             # in [-1, 1]
-    idx <- round((z + 1) / 2 * 100) + 1                  # 1..101
+    v_min <- if (length(finite_donor)) min(finite_donor) else -1
+    v_max <- if (length(finite_donor)) max(finite_donor) else  1
+    # Guard against a degenerate constant score (all equal): give the
+    # bar a tiny symmetric spread so colorRampPalette stays well-defined.
+    if (!is.finite(v_min) || !is.finite(v_max) || v_min == v_max) {
+      eps   <- if (is.finite(v_min) && v_min != 0) abs(v_min) else 1
+      v_min <- v_min - eps
+      v_max <- v_max + eps
+    }
+    pal  <- grDevices::colorRampPalette(c("#2166ac", "white", "#b2182b"))(101)
+    # Map score to [-1, 1] with white pinned at 0 on the score scale.
+    # If the observed range is one-sided (e.g. all positive), the bar
+    # simply starts in the white-to-red half -- still honest.
+    span <- max(abs(v_min), abs(v_max))
+    z    <- pmax(-1, pmin(1, v_score / span))             # in [-1, 1]
+    idx  <- round((z + 1) / 2 * 100) + 1                  # 1..101
   } else {
-    rng <- max(v_score[!is_treated], na.rm = TRUE)
-    rng <- if (is.finite(rng) && rng > 0) rng else 1
-    pal <- grDevices::hcl.colors(101, palette = "YlOrRd", rev = TRUE)
-    z   <- pmax(0, pmin(1, v_score / rng))
-    idx <- round(z * 100) + 1
+    v_min <- if (length(finite_donor)) min(finite_donor) else 0
+    v_max <- if (length(finite_donor)) max(finite_donor) else 1
+    if (!is.finite(v_min) || !is.finite(v_max) || v_min == v_max) {
+      v_min <- 0
+      v_max <- if (is.finite(v_max) && v_max > 0) v_max else 1
+    }
+    pal  <- grDevices::hcl.colors(101, palette = "YlOrRd", rev = TRUE)
+    span <- v_max - v_min
+    z    <- pmax(0, pmin(1, (v_score - v_min) / span))
+    idx  <- round(z * 100) + 1
   }
   v_col <- pal[idx]
   v_col[is_treated] <- "#444444"                         # treated marker
@@ -118,10 +151,34 @@ contaminationPlot <- function(model,
 
   e_width <- 1
 
+  # ----------------------------------------------------------------
+  # Layout. FR (and most force-directed layouts) use a random initial
+  # configuration, so successive calls yield different pictures. We
+  # materialise the layout matrix here under a fixed seed and then
+  # pass the matrix -- not the function -- to plot.igraph, which
+  # makes the result reproducible across calls. Pass `seed = NULL`
+  # to opt out and get the original stochastic behaviour.
+  # ----------------------------------------------------------------
   if (is.null(layout)) layout <- igraph::layout_with_fr
+  if (is.function(layout)) {
+    if (!is.null(seed)) {
+      old_seed <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE))
+        get(".Random.seed", envir = .GlobalEnv) else NULL
+      on.exit({
+        if (is.null(old_seed) &&
+            exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
+          rm(".Random.seed", envir = .GlobalEnv)
+        } else if (!is.null(old_seed)) {
+          assign(".Random.seed", old_seed, envir = .GlobalEnv)
+        }
+      }, add = TRUE)
+      set.seed(seed)
+    }
+    layout <- layout(g)
+  }
 
   op <- graphics::par(no.readonly = TRUE)
-  on.exit(graphics::par(op))
+  on.exit(graphics::par(op), add = TRUE)
   # Right margin reserved for the colour bar (was 6; the new bar is compact).
   graphics::par(mar = c(1, 1, 2, 4))
 
@@ -173,20 +230,40 @@ contaminationPlot <- function(model,
   top_pad    <- 0.05
   yt <- usr[4] - top_pad * (usr[4] - usr[3])
   yb_bot <- yt - bar_h_frac * (usr[4] - usr[3])
-  yb <- seq(yb_bot, yt, length.out = length(pal) + 1)
+  # Slice the palette to the [v_min, v_max] sub-range. For the signed
+  # case the palette is parameterised on [-span, span] with white at
+  # zero, so we map [v_min, v_max] into palette indices accordingly.
+  # For the unsigned case the palette already spans [v_min, v_max].
+  if (signed) {
+    lo_frac <- (v_min / span + 1) / 2
+    hi_frac <- (v_max / span + 1) / 2
+  } else {
+    lo_frac <- 0
+    hi_frac <- 1
+  }
+  lo_idx  <- max(1L, round(lo_frac * 100) + 1L)
+  hi_idx  <- min(length(pal), round(hi_frac * 100) + 1L)
+  bar_pal <- pal[lo_idx:hi_idx]
 
+  yb <- seq(yb_bot, yt, length.out = length(bar_pal) + 1)
   graphics::rect(xl, yb[-length(yb)], xr, yb[-1],
-                 col = pal, border = NA, xpd = TRUE)
+                 col = bar_pal, border = NA, xpd = TRUE)
   graphics::rect(xl, yb_bot, xr, yt,
                  col = NA, border = "gray40", xpd = TRUE)
 
-  # Three tick labels (min, mid, max), placed to the right of the bar.
-  if (signed) {
-    lab_txt <- formatC(c(-rng, 0, rng), digits = 2, format = "g")
+  # Tick labels: bottom = observed min, top = observed max, middle =
+  # midpoint of the observed range (or zero for the signed case when
+  # zero falls inside the range, which keeps the diverging anchor
+  # legible).
+  if (signed && v_min < 0 && v_max > 0) {
+    mid_val <- 0
+    mid_at  <- yb_bot + (0 - v_min) / (v_max - v_min) * (yt - yb_bot)
   } else {
-    lab_txt <- formatC(c(0, rng / 2, rng), digits = 2, format = "g")
+    mid_val <- (v_min + v_max) / 2
+    mid_at  <- (yb_bot + yt) / 2
   }
-  lab_at <- c(yb_bot, (yb_bot + yt) / 2, yt)
+  lab_txt <- formatC(c(v_min, mid_val, v_max), digits = 2, format = "g")
+  lab_at  <- c(yb_bot, mid_at, yt)
   graphics::text(xr, lab_at, labels = lab_txt,
                  pos = 4, cex = 0.7, xpd = TRUE)
 
@@ -257,6 +334,12 @@ contaminationPlot <- function(model,
 #'   ones. Default \code{FALSE}.
 #' @param digits Integer. Number of significant digits used when
 #'   \code{show_values = TRUE}. Default \code{2}.
+#' @param seed Integer or \code{NULL}. Seed used to make stochastic
+#'   layouts (e.g. \code{layout_with_fr}) reproducible across calls.
+#'   The seed is applied locally and the user's RNG state is restored
+#'   on exit. Set to \code{NULL} for the original stochastic behaviour.
+#'   Ignored when \code{layout} is a precomputed coordinate matrix.
+#'   Default \code{1L}.
 #'
 #' @return Invisibly returns a tibble with one row per node giving the
 #'   posterior mean effect (\code{effect_mean} -- \eqn{\bar\delta_j}
@@ -272,7 +355,8 @@ effectGraph <- function(model,
                         label_cex      = 0.8,
                         directed       = FALSE,
                         show_values    = FALSE,
-                        digits         = 2) {
+                        digits         = 2,
+                        seed           = 1L) {
 
   if (!requireNamespace("igraph", quietly = TRUE)) {
     stop("Package 'igraph' is required for effectGraph(). ",
@@ -286,7 +370,8 @@ effectGraph <- function(model,
     edge_threshold >= 0,
     is.numeric(vertex_size), length(vertex_size) == 1L, vertex_size > 0,
     is.numeric(label_cex),   length(label_cex)   == 1L, label_cex   > 0,
-    is.numeric(digits),      length(digits)      == 1L, digits      >= 1
+    is.numeric(digits),      length(digits)      == 1L, digits      >= 1,
+    is.null(seed) || (is.numeric(seed) && length(seed) == 1L)
   )
 
   # ----------------------------------------------------------------
@@ -366,24 +451,41 @@ effectGraph <- function(model,
 
   # ----------------------------------------------------------------
   # Single shared palette covering ALL nodes (donors + treated). The
-  # range is computed jointly so direct and indirect effects sit on
-  # the same scale -- this is the whole point of plotting them
-  # together. With the ATT typically dominating, the treated node is
-  # usually saturated and donors trail off; the contrast itself is
-  # informative.
+  # range is set to the actual [min, max] of the plotted scores, so
+  # the legend interval shrinks to what is really observed instead
+  # of being padded out symmetrically. For the signed palette we
+  # still anchor white at zero (otherwise the diverging colours lose
+  # their meaning), but the bar end-points are the true min and max.
   # ----------------------------------------------------------------
+  finite_score <- v_score[is.finite(v_score)]
   if (signed) {
-    rng <- max(abs(v_score), na.rm = TRUE)
-    rng <- if (is.finite(rng) && rng > 0) rng else 1
+    v_min <- if (length(finite_score)) min(finite_score) else -1
+    v_max <- if (length(finite_score)) max(finite_score) else  1
+    # Guard against a degenerate constant score (all equal): give the
+    # bar a tiny symmetric spread so colorRampPalette stays well-defined.
+    if (!is.finite(v_min) || !is.finite(v_max) || v_min == v_max) {
+      eps   <- if (is.finite(v_min) && v_min != 0) abs(v_min) else 1
+      v_min <- v_min - eps
+      v_max <- v_max + eps
+    }
     pal <- grDevices::colorRampPalette(c("#2166ac", "white", "#b2182b"))(101)
-    z   <- pmax(-1, pmin(1, v_score / rng))
-    idx <- round((z + 1) / 2 * 100) + 1
+    # Map score to [0, 1] with white pinned at 0 on the score scale.
+    # If the observed range is one-sided (e.g. all positive), the bar
+    # simply starts in the white-to-red half -- still honest.
+    span <- max(abs(v_min), abs(v_max))
+    z    <- pmax(-1, pmin(1, v_score / span))
+    idx  <- round((z + 1) / 2 * 100) + 1
   } else {
-    rng <- max(v_score, na.rm = TRUE)
-    rng <- if (is.finite(rng) && rng > 0) rng else 1
-    pal <- grDevices::hcl.colors(101, palette = "YlOrRd", rev = TRUE)
-    z   <- pmax(0, pmin(1, v_score / rng))
-    idx <- round(z * 100) + 1
+    v_min <- if (length(finite_score)) min(finite_score) else 0
+    v_max <- if (length(finite_score)) max(finite_score) else 1
+    if (!is.finite(v_min) || !is.finite(v_max) || v_min == v_max) {
+      v_min <- 0
+      v_max <- if (is.finite(v_max) && v_max > 0) v_max else 1
+    }
+    pal  <- grDevices::hcl.colors(101, palette = "YlOrRd", rev = TRUE)
+    span <- v_max - v_min
+    z    <- pmax(0, pmin(1, (v_score - v_min) / span))
+    idx  <- round(z * 100) + 1
   }
   v_col <- pal[idx]
 
@@ -405,10 +507,34 @@ effectGraph <- function(model,
 
   e_width <- 1
 
+  # ----------------------------------------------------------------
+  # Layout. FR (and most force-directed layouts) use a random initial
+  # configuration, so successive calls yield different pictures. We
+  # materialise the layout matrix here under a fixed seed and then
+  # pass the matrix -- not the function -- to plot.igraph, which
+  # makes the result reproducible across calls. Pass `seed = NULL`
+  # to opt out and get the original stochastic behaviour.
+  # ----------------------------------------------------------------
   if (is.null(layout)) layout <- igraph::layout_with_fr
+  if (is.function(layout)) {
+    if (!is.null(seed)) {
+      old_seed <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE))
+        get(".Random.seed", envir = .GlobalEnv) else NULL
+      on.exit({
+        if (is.null(old_seed) &&
+            exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
+          rm(".Random.seed", envir = .GlobalEnv)
+        } else if (!is.null(old_seed)) {
+          assign(".Random.seed", old_seed, envir = .GlobalEnv)
+        }
+      }, add = TRUE)
+      set.seed(seed)
+    }
+    layout <- layout(g)
+  }
 
   op <- graphics::par(no.readonly = TRUE)
-  on.exit(graphics::par(op))
+  on.exit(graphics::par(op), add = TRUE)
   graphics::par(mar = c(1, 1, 2, 4))
 
   igraph::plot.igraph(
@@ -430,9 +556,10 @@ effectGraph <- function(model,
 
   # ----------------------------------------------------------------
   # Compact colour-bar legend (geometry matches contaminationPlot()
-  # so the two figures align side by side). Tick labels are picked
-  # from the joint donor+treated range so the bar covers everything
-  # actually plotted.
+  # so the two figures align side by side). The bar now covers only
+  # the slice of the palette that lies between the observed min and
+  # max scores -- i.e. it shrinks to the data, instead of running
+  # the full -rng..+rng span.
   # ----------------------------------------------------------------
   usr <- graphics::par("usr")
   pin <- graphics::par("pin")
@@ -450,19 +577,41 @@ effectGraph <- function(model,
   top_pad    <- 0.05
   yt <- usr[4] - top_pad * (usr[4] - usr[3])
   yb_bot <- yt - bar_h_frac * (usr[4] - usr[3])
-  yb <- seq(yb_bot, yt, length.out = length(pal) + 1)
 
+  # Slice the palette to the [v_min, v_max] sub-range. For the signed
+  # case the palette is parameterised on [-span, span] with white at
+  # zero, so we map [v_min, v_max] into palette indices accordingly.
+  # For the unsigned case the palette already spans [v_min, v_max].
+  if (signed) {
+    lo_frac <- (v_min / span + 1) / 2
+    hi_frac <- (v_max / span + 1) / 2
+  } else {
+    lo_frac <- 0
+    hi_frac <- 1
+  }
+  lo_idx  <- max(1L, round(lo_frac * 100) + 1L)
+  hi_idx  <- min(length(pal), round(hi_frac * 100) + 1L)
+  bar_pal <- pal[lo_idx:hi_idx]
+
+  yb <- seq(yb_bot, yt, length.out = length(bar_pal) + 1)
   graphics::rect(xl, yb[-length(yb)], xr, yb[-1],
-                 col = pal, border = NA, xpd = TRUE)
+                 col = bar_pal, border = NA, xpd = TRUE)
   graphics::rect(xl, yb_bot, xr, yt,
                  col = NA, border = "gray40", xpd = TRUE)
 
-  if (signed) {
-    lab_txt <- formatC(c(-rng, 0, rng), digits = 2, format = "g")
+  # Tick labels: bottom = observed min, top = observed max, middle =
+  # midpoint of the observed range (or zero for the signed case when
+  # zero falls inside the range, which keeps the diverging anchor
+  # legible).
+  if (signed && v_min < 0 && v_max > 0) {
+    mid_val <- 0
+    mid_at  <- yb_bot + (0 - v_min) / (v_max - v_min) * (yt - yb_bot)
   } else {
-    lab_txt <- formatC(c(0, rng / 2, rng), digits = 2, format = "g")
+    mid_val <- (v_min + v_max) / 2
+    mid_at  <- (yb_bot + yt) / 2
   }
-  lab_at <- c(yb_bot, (yb_bot + yt) / 2, yt)
+  lab_txt <- formatC(c(v_min, mid_val, v_max), digits = 2, format = "g")
+  lab_at  <- c(yb_bot, mid_at, yt)
   graphics::text(xr, lab_at, labels = lab_txt,
                  pos = 4, cex = 0.7, xpd = TRUE)
 

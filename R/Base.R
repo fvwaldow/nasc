@@ -867,15 +867,18 @@ nascSynth <- R6::R6Class(
     },
 
     #' @description
-    #' Plot the estimated treatment effect (tau) over time. When the model
-    #' uses a network and \code{indirect = TRUE} (the default in that
-    #' case), the per-period total indirect (spillover) effect is drawn
-    #' in a second stacked panel below the direct effect. Set
-    #' \code{indirect = FALSE} to suppress the indirect panel even when
-    #' a network is in use.
+    #' Plot the estimated direct treatment effect (\eqn{\tau_{1t}}) over
+    #' time. When the model uses a network and \code{indirect = TRUE} (the
+    #' default in that case), the per-period donor-AVERAGE indirect
+    #' (spillover) effect
+    #' \eqn{\bar\delta_t = (1/J)\sum_i \delta_{i,t}^{NASC}} is overlaid on
+    #' the same panel as a second line, with its own credible-interval
+    #' band. Pre-treatment is omitted for the indirect line (spillover is
+    #' identically zero by construction before intervention). Set
+    #' \code{indirect = FALSE} to suppress the overlay.
     #'
     #' @param indirect Logical or \code{NULL}. When \code{NULL} (default),
-    #'   the indirect panel is shown iff \code{uses_rho = TRUE}.
+    #'   the indirect overlay is shown iff \code{uses_rho = TRUE}.
     effectPlot = function(indirect = NULL) {
       indirect_default <- isTRUE(private$uses_rho)
       if (is.null(indirect)) indirect <- indirect_default
@@ -886,7 +889,7 @@ nascSynth <- R6::R6Class(
       # Direct effect: as before, from plot_data.
       if (indirect) {
         # Try to compute indirect-effect time series. If unavailable
-        # (e.g. uses_rho = FALSE), fall back to single-panel layout.
+        # (e.g. uses_rho = FALSE), fall back to single-line layout.
         ind <- tryCatch(.nasc_indirect_draws(self), error = function(e) NULL)
         if (is.null(ind)) {
           if (indirect_default) {
@@ -897,7 +900,7 @@ nascSynth <- R6::R6Class(
       }
 
       if (!indirect) {
-        # Original single-panel direct-effect plot.
+        # Original single-line direct-effect plot.
         .plot_tau(
           data       = private$plot_data,
           x          = time_name,
@@ -909,197 +912,79 @@ nascSynth <- R6::R6Class(
         return(invisible(NULL))
       }
 
-      # ---- Two-panel layout: direct on top, total indirect below ----
+      # ---- Single-panel overlay: direct + donor-average indirect ----
       ci    <- private$ci_width
       probs <- .ci_probs(ci)
-      delta_total <- ind$delta_total       # [n_draws x T_post]
+
+      # Donor-average per-period spillover. delta_total[d, t] is the
+      # SUM across donors at period t; dividing by J turns it into the
+      # donor-average, which is the quantity reported in the summary.
+      # We rebuild draws so the credible-interval band reflects the
+      # posterior of the AVERAGE (just rescaling by 1/J vs the total
+      # gives the same band geometry up to that scalar, but doing it
+      # via per-draw division keeps the code symmetric with the
+      # summary helper).
+      J <- length(ind$donor_names)
+      delta_avg_draws <- ind$delta_total / J
       ind_summary <- tibble::tibble(
         !!time_name := ind$time_post,
-        delta    = apply(delta_total, 2, mean),
-        delta_LB = apply(delta_total, 2, \(z) stats::quantile(z, probs[1], names = FALSE)),
-        delta_UB = apply(delta_total, 2, \(z) stats::quantile(z, probs[2], names = FALSE))
+        delta    = apply(delta_avg_draws, 2, mean),
+        delta_LB = apply(delta_avg_draws, 2, \(z) stats::quantile(z, probs[1], names = FALSE)),
+        delta_UB = apply(delta_avg_draws, 2, \(z) stats::quantile(z, probs[2], names = FALSE))
       )
 
-      op <- graphics::par(no.readonly = TRUE)
-      on.exit(graphics::par(op))
-      graphics::par(mfrow = c(2, 1),
-                    mar = c(2.5, 5, 1.5, 1),
-                    oma = c(3, 0, 0, 0),
-                    bty = "l")
-
-      # ---- Top: direct effect (replicates .plot_tau, top panel) ----
+      # Direct-effect series from plot_data (covers full pre+post window).
       pd <- as.data.frame(private$plot_data)
       pd <- pd[order(pd[[time_name]]), , drop = FALSE]
       xv  <- pd[[time_name]]
       yv  <- pd$tau
       lbv <- pd$tau_LB
       ubv <- pd$tau_UB
-      yrng <- range(c(yv, lbv, ubv), na.rm = TRUE)
-      plot(xv, yv, type = "n", ylim = yrng, xlab = "", ylab = "tau (direct)",
-           xaxt = "n")
-      graphics::grid(lty = "dotted", col = "gray80")
-      graphics::polygon(c(xv, rev(xv)), c(lbv, rev(ubv)),
-                        col = grDevices::adjustcolor("steelblue", alpha.f = 0.2),
-                        border = NA)
-      graphics::lines(xv, yv, lwd = 2, col = "steelblue4")
-      graphics::abline(v = private$intervention, lty = 2)
-      graphics::abline(h = 0, lty = 1, col = "black")
 
-      # ---- Bottom: total indirect effect ----
-      xv2  <- ind_summary[[time_name]]
-      yv2  <- ind_summary$delta
-      lb2  <- ind_summary$delta_LB
-      ub2  <- ind_summary$delta_UB
+      # Indirect-effect series: post-window only (spillover is
+      # identically zero pre-intervention by construction).
+      xv2 <- ind_summary[[time_name]]
+      yv2 <- ind_summary$delta
+      lb2 <- ind_summary$delta_LB
+      ub2 <- ind_summary$delta_UB
 
-      # Pre-treatment is identically zero by construction (no spillover
-      # before intervention); we plot only the post-treatment series and
-      # share the x-range with the direct panel for visual alignment.
-      xrng_top <- range(xv, na.rm = TRUE)
-      yrng2 <- range(c(yv2, lb2, ub2, 0), na.rm = TRUE)
-
-      plot(xv2, yv2, type = "n",
-           xlim = xrng_top, ylim = yrng2,
-           xlab = time_name,
-           ylab = expression(delta ~ "(indirect, total)"))
-      graphics::grid(lty = "dotted", col = "gray80")
-      graphics::polygon(c(xv2, rev(xv2)), c(lb2, rev(ub2)),
-                        col = grDevices::adjustcolor("indianred", alpha.f = 0.2),
-                        border = NA)
-      graphics::lines(xv2, yv2, lwd = 2, col = "indianred4")
-      graphics::abline(v = private$intervention, lty = 2)
-      graphics::abline(h = 0, lty = 1, col = "black")
-
-      invisible(NULL)
-    },
-
-    #' @description
-    #' Plot the estimated indirect (spillover) treatment effect over time.
-    #' By Proposition 6.2 the per-donor spillover at post-period t is
-    #' \eqn{\delta_{i,t}^{NASC} = s_i \cdot \tau_{1t}^{NASC}}. This method
-    #' supports two views:
-    #'
-    #' \itemize{
-    #'   \item \code{which = "total"} (default): draws the per-period
-    #'         total spillover \eqn{\sum_i \delta_{i,t}} as a single
-    #'         line with a credible-interval band. This is the natural
-    #'         population analog of the direct-effect time series.
-    #'   \item \code{which = "by_donor"}: draws one line per donor for
-    #'         the per-period donor-specific spillover
-    #'         \eqn{\delta_{i,t}}. Useful for diagnosing which donors
-    #'         absorb most of the spillover; a legend is omitted when
-    #'         the donor pool is large.
-    #' }
-    #'
-    #' Requires the model to be configured with a network
-    #' (\code{uses_rho = TRUE}, i.e. either \code{bias_correction = TRUE}
-    #' or \code{nasc_penalty = TRUE} -- otherwise spillover is identically
-    #' zero by construction and the plot is uninformative).
-    #'
-    #' @param which One of \code{"total"} or \code{"by_donor"}.
-    #' @param top_n Integer or \code{NULL}. Only used when
-    #'   \code{which = "by_donor"}: if not \code{NULL}, restrict to the
-    #'   \code{top_n} donors with largest \eqn{|s_i|} (i.e. those that
-    #'   carry most of the spillover). Default \code{NULL} (all donors).
-    indirectEffectPlot = function(which = c("total", "by_donor"),
-                                  top_n = NULL) {
-      which <- match.arg(which)
-      ind <- .nasc_indirect_draws(self)
-      if (is.null(ind)) {
-        stop("Indirect-effect plotting requires a model with a non-trivial ",
-             "rho. Re-fit with bias_correction = TRUE or nasc_penalty = TRUE.")
-      }
-
-      time_name <- rlang::as_name(private$time)
-      ci <- private$ci_width
-      probs <- .ci_probs(ci)
+      # Joint y-range covers both series' lines and bands so neither
+      # gets clipped on the overlay. Includes 0 so the reference line
+      # is always visible.
+      yrng <- range(c(yv, lbv, ubv, yv2, lb2, ub2, 0), na.rm = TRUE)
 
       op <- graphics::par(no.readonly = TRUE)
       on.exit(graphics::par(op))
-      graphics::par(bty = "l", mar = c(4, 5, 2, 1))
+      graphics::par(mar = c(4, 5, 2, 1), bty = "l")
 
-      if (which == "total") {
-        delta_total <- ind$delta_total
-        xv  <- ind$time_post
-        yv  <- apply(delta_total, 2, mean)
-        lb  <- apply(delta_total, 2, \(z) stats::quantile(z, probs[1], names = FALSE))
-        ub  <- apply(delta_total, 2, \(z) stats::quantile(z, probs[2], names = FALSE))
+      plot(xv, yv, type = "n", ylim = yrng,
+           xlab = time_name, ylab = "effect")
+      graphics::grid(lty = "dotted", col = "gray80")
 
-        ord <- order(xv)
-        xv <- xv[ord]; yv <- yv[ord]; lb <- lb[ord]; ub <- ub[ord]
+      # Bands first (so lines render on top). Indirect band comes
+      # before direct band so when they overlap, direct -- the primary
+      # quantity -- dominates visually.
+      graphics::polygon(c(xv2, rev(xv2)), c(lb2, rev(ub2)),
+                        col = grDevices::adjustcolor("indianred", alpha.f = 0.15),
+                        border = NA)
+      graphics::polygon(c(xv, rev(xv)), c(lbv, rev(ubv)),
+                        col = grDevices::adjustcolor("steelblue", alpha.f = 0.15),
+                        border = NA)
 
-        yrng <- range(c(yv, lb, ub, 0), na.rm = TRUE)
-        plot(xv, yv, type = "n", ylim = yrng,
-             xlab = time_name,
-             ylab = expression(delta ~ "(indirect, total)"))
-        graphics::grid(lty = "dotted", col = "gray80")
-        graphics::polygon(c(xv, rev(xv)), c(lb, rev(ub)),
-                          col = grDevices::adjustcolor("indianred", alpha.f = 0.2),
-                          border = NA)
-        graphics::lines(xv, yv, lwd = 2, col = "indianred4")
-        graphics::abline(v = private$intervention, lty = 2)
-        graphics::abline(h = 0, lty = 1, col = "black")
+      # Lines on top of bands.
+      graphics::lines(xv, yv, lwd = 2, col = "steelblue4")
+      graphics::lines(xv2, yv2, lwd = 2, col = "indianred4")
 
-      } else {
-        # by_donor: one line per donor, no CI band (would be unreadable
-        # for J > ~3). Lines are coloured from a qualitative palette.
-        delta_arr  <- ind$delta_arr             # [n_draws x T_post x J]
-        donor_nm   <- ind$donor_names
-        xv         <- ind$time_post
+      graphics::abline(v = private$intervention, lty = 2)
+      graphics::abline(h = 0, lty = 1, col = "black")
 
-        # Per-period mean per donor: collapse the draws dimension.
-        per_donor_mean <- apply(delta_arr, c(2L, 3L), mean)
-        # Returns a [T_post x J] matrix.
-        if (!is.matrix(per_donor_mean)) {
-          per_donor_mean <- matrix(per_donor_mean,
-                                   nrow = length(xv),
-                                   ncol = length(donor_nm))
-        }
-        colnames(per_donor_mean) <- donor_nm
-
-        keep <- seq_len(ncol(per_donor_mean))
-        if (!is.null(top_n)) {
-          stopifnot(is.numeric(top_n), length(top_n) == 1L, top_n >= 1)
-          # Rank by mean |delta| over time as a proxy for "absorbs
-          # most spillover".
-          rank_score <- apply(abs(per_donor_mean), 2, mean)
-          keep <- order(rank_score, decreasing = TRUE)[
-            seq_len(min(as.integer(top_n), length(rank_score)))
-          ]
-        }
-        per_donor_mean <- per_donor_mean[, keep, drop = FALSE]
-        donor_show     <- donor_nm[keep]
-        n_show         <- length(donor_show)
-
-        ord <- order(xv)
-        xv <- xv[ord]
-        per_donor_mean <- per_donor_mean[ord, , drop = FALSE]
-
-        yrng <- range(c(as.numeric(per_donor_mean), 0), na.rm = TRUE)
-        plot(xv, per_donor_mean[, 1], type = "n", ylim = yrng,
-             xlab = time_name,
-             ylab = expression(delta[i] ~ "(indirect, per donor)"))
-        graphics::grid(lty = "dotted", col = "gray80")
-        graphics::abline(v = private$intervention, lty = 2)
-        graphics::abline(h = 0, lty = 1, col = "black")
-
-        cols <- grDevices::hcl.colors(max(n_show, 2L), palette = "Dark 3")[seq_len(n_show)]
-        for (k in seq_len(n_show)) {
-          graphics::lines(xv, per_donor_mean[, k], col = cols[k], lwd = 1.6)
-        }
-
-        # Legend only for tractable donor counts; otherwise label most
-        # extreme line at the right edge to avoid an unreadable legend.
-        if (n_show <= 12L) {
-          graphics::legend("topleft",
-                           legend = donor_show,
-                           col    = cols,
-                           lty    = 1, lwd = 1.6,
-                           bg     = grDevices::adjustcolor("white", alpha.f = 0.85),
-                           box.col = "gray70",
-                           cex    = 0.8,
-                           ncol   = if (n_show > 6L) 2L else 1L)
-        }
-      }
+      graphics::legend("topleft",
+                       legend = c(expression(tau ~ "(direct)"),
+                                  expression(bar(delta) ~ "(indirect, donor-avg)")),
+                       col    = c("steelblue4", "indianred4"),
+                       lty    = 1, lwd = 2,
+                       bg     = grDevices::adjustcolor("white", alpha.f = 0.85),
+                       box.col = "gray70")
 
       invisible(NULL)
     },
@@ -1233,9 +1118,11 @@ nascSynth <- R6::R6Class(
     #' Posterior density plot of the average treatment effect on the treated
     #' (ATT), pooled across all post-treatment periods. When the model uses
     #' a network, a second panel is added showing the density of the
-    #' average total indirect (spillover) effect, defined as the per-draw
-    #' average across post-periods of \eqn{\sum_i \delta_{i,t}^{NASC}}
-    #' (the spillover analog of ATT, Proposition 6.2).
+    #' average indirect (spillover) effect, defined as the per-draw
+    #' average across BOTH donors and post-periods of
+    #' \eqn{\delta_{i,t}^{NASC}} (the spillover analog of ATT,
+    #' Proposition 6.2). This matches the "Average indirect Treatment
+    #' Effect" reported in \code{summary()}.
     #'
     #' @param indirect Logical. If \code{TRUE} (default when the model uses
     #'   a network), append a second panel for the average indirect effect.
@@ -1268,11 +1155,17 @@ nascSynth <- R6::R6Class(
       if (is.null(indirect)) indirect <- indirect_default
       stopifnot(is.logical(indirect), length(indirect) == 1L)
 
-      avg_total_draws <- NULL
+      avg_indirect_draws <- NULL
       if (indirect) {
         ind <- tryCatch(.nasc_indirect_draws(self), error = function(e) NULL)
         if (!is.null(ind)) {
-          avg_total_draws <- ind$avg_total
+          # avg_total[d] is the per-draw mean across post-periods of the
+          # donor-SUM spillover. Dividing by J turns it into the
+          # donor-AVERAGE across both axes (donors and periods), which
+          # is the spillover analog of ATT and matches the scalar
+          # reported by summary()$indirect_avg.
+          J <- length(ind$donor_names)
+          avg_indirect_draws <- ind$avg_total / J
         } else {
           if (indirect_default) {
             warning("Indirect-effect draws unavailable; drawing ATT only.")
@@ -1298,9 +1191,9 @@ nascSynth <- R6::R6Class(
       graphics::abline(v = 0, lty = 3, col = "gray40")
 
       if (indirect) {
-        d_ind <- stats::density(avg_total_draws, na.rm = TRUE)
-        plot(d_ind, main = "Average indirect effect (total)",
-             xlab = expression(bar(delta)^{total}), ylab = "density")
+        d_ind <- stats::density(avg_indirect_draws, na.rm = TRUE)
+        plot(d_ind, main = "Average indirect effect (donor-avg)",
+             xlab = expression(bar(bar(delta))), ylab = "density")
         graphics::polygon(d_ind,
                           col = grDevices::adjustcolor("indianred", alpha.f = 0.3),
                           border = "indianred")
@@ -1313,20 +1206,20 @@ nascSynth <- R6::R6Class(
     #' @description
     #' Posterior density plots of the period-by-period treatment effects
     #' for all post-treatment periods. When the model uses a network (i.e.
-    #' \code{uses_rho = TRUE}), two columns are drawn: the left column is
-    #' the direct effect \eqn{\tau_{1t}} and the right column is the
-    #' total indirect (spillover) effect
-    #' \eqn{\delta_t^{total} = \sum_{i=2}^{J+1}\delta_{i,t}^{NASC}}, with
-    #' one row per post period. When no network is in use, only the
-    #' direct-effect column is drawn (single-column layout, preserving
-    #' previous behavior). Panels within a column share a common x-axis;
-    #' the two columns use independent x-axes since direct and indirect
-    #' effects are typically on very different scales.
+    #' \code{uses_rho = TRUE}), two columns are drawn side by side: the
+    #' left column is the direct effect \eqn{\tau_{1t}} and the right
+    #' column is the donor-AVERAGE indirect effect
+    #' \eqn{\bar\delta_t = (1/J)\sum_i \delta_{i,t}^{NASC}}, with one row
+    #' per post-period. When no network is in use, only the direct-effect
+    #' column is drawn (single-column layout, preserving previous
+    #' behavior). Panels within a column share a common x-axis; the two
+    #' columns use independent x-axes since direct and indirect effects
+    #' are typically on very different scales.
     #'
     #' @param indirect Logical. If \code{TRUE} (default when the model
-    #'   uses a network), also draw the per-period total indirect-effect
-    #'   density column. Set to \code{FALSE} to suppress the indirect
-    #'   panels even when a network is in use.
+    #'   uses a network), also draw the per-period donor-average indirect
+    #'   effect density column. Set to \code{FALSE} to suppress the
+    #'   indirect panels even when a network is in use.
     tauPlot = function(indirect = NULL) {
       if (is.null(private$y_synth_draws)) stop("Run $fit() before calling tauPlot.")
 
@@ -1365,18 +1258,22 @@ nascSynth <- R6::R6Class(
       if (is.null(indirect)) indirect <- indirect_default
       stopifnot(is.logical(indirect), length(indirect) == 1L)
 
-      delta_total_draws <- NULL
+      delta_avg_draws <- NULL
       if (indirect) {
         ind <- tryCatch(.nasc_indirect_draws(self), error = function(e) NULL)
         if (!is.null(ind)) {
-          delta_total_draws <- ind$delta_total      # [n_draws x T_post]
+          # Donor-AVERAGE per-period spillover (matches summary).
+          # delta_total[d, t] is the SUM across donors at period t;
+          # dividing by J gives the donor-average.
+          J <- length(ind$donor_names)
+          delta_avg_draws <- ind$delta_total / J         # [n_draws x T_post]
         } else if (indirect_default) {
           # Only warn when the user (or the default) actually expected
           # indirect draws. If the model has no rho, falling back to the
           # single-column layout silently is the desired behavior.
           warning("Indirect-effect draws unavailable; drawing direct effect only.")
         }
-        if (is.null(delta_total_draws)) indirect <- FALSE
+        if (is.null(delta_avg_draws)) indirect <- FALSE
       }
 
       # Direct-effect densities (always drawn)
@@ -1389,7 +1286,7 @@ nascSynth <- R6::R6Class(
       xr_ind   <- NULL
       if (indirect) {
         dens_ind <- lapply(seq_len(n_t),
-                           function(i) stats::density(delta_total_draws[, i],
+                           function(i) stats::density(delta_avg_draws[, i],
                                                       na.rm = TRUE))
         xr_ind <- range(sapply(dens_ind, function(d) d$x))
       }
@@ -1426,7 +1323,7 @@ nascSynth <- R6::R6Class(
           d_j <- dens_ind[[i]]
           plot(d_j,
                main = paste0("Period ", time_post[i]),
-               xlab = if (is_last) expression(delta ~ "(indirect, total)") else "",
+               xlab = if (is_last) expression(bar(delta) ~ "(indirect, donor-avg)") else "",
                ylab = "density",
                xlim = xr_ind,
                xaxt = if (is_last) "s" else "n")
@@ -1439,9 +1336,9 @@ nascSynth <- R6::R6Class(
 
       # Column headings in the outer top margin
       if (indirect) {
-        graphics::mtext("Direct effect",   side = 3, outer = TRUE,
+        graphics::mtext("Direct effect", side = 3, outer = TRUE,
                         at = 0.25, line = 0.6, font = 2)
-        graphics::mtext("Indirect effect (total)", side = 3, outer = TRUE,
+        graphics::mtext("Indirect effect (donor-avg)", side = 3, outer = TRUE,
                         at = 0.75, line = 0.6, font = 2)
       } else {
         graphics::mtext("",
