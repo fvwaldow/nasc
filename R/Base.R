@@ -61,7 +61,8 @@ nascSynth <- R6::R6Class(
     uses_rho   = NULL,
     uses_step1 = NULL,
     beta_identified = NULL,
-    cov_names = NULL
+    cov_names = NULL,
+    predictor_weights = NULL
   ),
   active = list(
     #' @field plotData Tibble with observed and counterfactual outcomes
@@ -103,12 +104,24 @@ nascSynth <- R6::R6Class(
     #' @param nasc_penalty Logical. If \code{TRUE}, the NASC penalty
     #'   \eqn{-\lambda \langle w, |s| \rangle} enters the likelihood. Same
     #'   model-aware default as \code{bias_correction}.
+    #' @param predictor_weights Optional non-negative numeric vector giving the
+    #'   importance weight for each covariate in the Step-2 SCM matching loss
+    #'   (the diagonal of Abadie-Diamond-Hainmueller's V matrix; same role as
+    #'   the \code{vs} argument in the bsynth package). Length must equal the
+    #'   number of covariate columns in \code{covariates}, in the same column
+    #'   order. \code{NULL} (default) gives equal weight (= 1) to every
+    #'   covariate. Setting an entry to 0 removes that covariate from the
+    #'   matching loss without dropping it from the data. Outcome rows always
+    #'   carry implicit weight 1; \code{predictor_weights} only re-scales the
+    #'   covariate-matching contribution. Has no effect when \code{covariates}
+    #'   is \code{NULL}.
     initialize = function(data, time, id, treated, outcome, ci_width = 0.75,
                           covariates = NULL,
                           W = NULL, spatial_model = "none",
                           rho = NULL,
                           bias_correction = NULL,
-                          nasc_penalty = NULL) {
+                          nasc_penalty = NULL,
+                          predictor_weights = NULL) {
 
       stopifnot(ci_width > 0 & ci_width < 1)
 
@@ -174,6 +187,35 @@ nascSynth <- R6::R6Class(
       private$outcome         <- rlang::enquo(outcome)
       private$ci_width        <- ci_width
       private$covariates      <- covariates
+
+      # Validate predictor_weights against the supplied covariates. We only
+      # need to know the count of covariate columns; the same vector is used
+      # by both Step-2 paths (nasc_penalty = TRUE -> v_cov on appended
+      # matching rows in stan_2_NASC; nasc_penalty = FALSE -> v_aug on
+      # appended rows in model1.stan).
+      if (!is.null(predictor_weights)) {
+        if (is.null(covariates)) {
+          stop("predictor_weights was supplied but covariates is NULL.")
+        }
+        cov_cols_for_check <- setdiff(
+          names(covariates),
+          c(rlang::as_name(rlang::enquo(time)),
+            rlang::as_name(rlang::enquo(id)))
+        )
+        if (length(predictor_weights) != length(cov_cols_for_check)) {
+          stop(sprintf(
+            "predictor_weights has length %d but covariates has %d predictor column(s).",
+            length(predictor_weights), length(cov_cols_for_check)
+          ))
+        }
+        if (!is.numeric(predictor_weights) || any(!is.finite(predictor_weights)) ||
+            any(predictor_weights < 0)) {
+          stop("predictor_weights must be a finite, non-negative numeric vector.")
+        }
+        names(predictor_weights) <- cov_cols_for_check
+      }
+      private$predictor_weights <- predictor_weights
+
       private$W               <- W
       private$spatial_model   <- spatial_model
       private$rho_exogenous   <- rho
@@ -682,6 +724,23 @@ nascSynth <- R6::R6Class(
           X_cov1_vec  <- numeric(0)
         }
 
+        # Resolve V-matrix entries (predictor_weights) for the K_cov rows.
+        # Default: equal weight 1 for every covariate. When the user supplied
+        # predictor_weights, we align by name so the order in `covariates`
+        # need not match the canonical pivot order.
+        if (K_cov_step2 > 0L) {
+          if (!is.null(private$predictor_weights)) {
+            if (!all(cov_names_step2 %in% names(private$predictor_weights))) {
+              stop("predictor_weights names do not cover all covariates seen in Step 2.")
+            }
+            v_cov_vec <- as.numeric(private$predictor_weights[cov_names_step2])
+          } else {
+            v_cov_vec <- rep(1.0, K_cov_step2)
+          }
+        } else {
+          v_cov_vec <- numeric(0)
+        }
+
         base_data <- list(
           J                   = length(donor_ids),
           T0                  = nrow(pre_data),
@@ -698,7 +757,8 @@ nascSynth <- R6::R6Class(
           use_bias_correction = as.integer(private$bias_correction),
           K_cov               = K_cov_step2,
           X_cov0              = X_cov0_mat,
-          X_cov1              = if (K_cov_step2 > 0L) as.array(X_cov1_vec) else numeric(0)
+          X_cov1              = if (K_cov_step2 > 0L) as.array(X_cov1_vec) else numeric(0),
+          v_cov               = if (K_cov_step2 > 0L) as.array(v_cov_vec) else numeric(0)
         )
 
         results <- .run_step2_loop(
@@ -740,6 +800,26 @@ nascSynth <- R6::R6Class(
           rho_bc  <- 0
         }
 
+        # V-matrix entries for the appended covariate rows in model1.stan.
+        # Outcome rows are 1..n_pre_real; covariate rows (if any) are
+        # n_pre_real+1..nrow(X), in the same row order as `cov_names` from
+        # the use_covariate_rows block above.
+        N_total    <- nrow(X)
+        N_outcome  <- n_pre_real
+        N_aug      <- N_total - N_outcome
+        if (N_aug > 0L) {
+          if (!is.null(private$predictor_weights)) {
+            if (!all(cov_names %in% names(private$predictor_weights))) {
+              stop("predictor_weights names do not cover all covariates seen in Step 2.")
+            }
+            v_aug_vec <- as.numeric(private$predictor_weights[cov_names])
+          } else {
+            v_aug_vec <- rep(1.0, N_aug)
+          }
+        } else {
+          v_aug_vec <- numeric(0)
+        }
+
         base_data <- list(
           N                   = nrow(X),
           # as.array() forces length-1 numerics to serialize as length-1
@@ -753,7 +833,9 @@ nascSynth <- R6::R6Class(
           J_bc                = J_bc,
           W_J                 = W_J_bc,
           w_J1                = if (J_bc > 0L) as.array(as.numeric(w_J1_bc)) else numeric(0),
-          rho_bc              = if (private$bias_correction) rho_bc else 0
+          rho_bc              = if (private$bias_correction) rho_bc else 0,
+          N_outcome           = N_outcome,
+          v_aug               = if (N_aug > 0L) as.array(v_aug_vec) else numeric(0)
         )
 
         if (!private$bias_correction) {

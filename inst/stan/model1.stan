@@ -24,9 +24,21 @@
 //
 // Generated-quantity names (y_sim_pre, y_counterfactual) are harmonized with
 // stan_2_NASC.stan so that one R post-processing path handles both files.
+//
+// PREDICTOR IMPORTANCE WEIGHTS (v_aug):
+//   When R augments X with appended covariate rows (use_covariate_rows path),
+//   the bottom (N - N_outcome) rows of X are pre-treatment unit means of
+//   covariates, not outcomes. v_aug provides per-row importance weights for
+//   those appended rows, mirroring the V matrix in classical Abadie-Diamond-
+//   Hainmueller SCM. Each augmented row k is treated as
+//     Normal(., sigma / sqrt(v_aug[k]))
+//   so v_aug[k] = 1 (default) recovers equal weighting and v_aug[k] = 0
+//   removes that covariate from the matching loss. Outcome rows always have
+//   implicit weight 1. When N_outcome == N (no covariate augmentation), v_aug
+//   is length 0 and has no effect.
 
 data {
-   int<lower=1> N;                    // number of pre-intervention periods
+   int<lower=1> N;                    // number of pre-intervention periods (or N_outcome + N_cov rows)
    vector[N] y;                       // outcome
    int<lower=0> K;                    // number of donors
    matrix[N,K] X;                     // pre-intervention outcome for donors
@@ -39,6 +51,13 @@ data {
    matrix[J_bc, J_bc] W_J;            // donor-donor block of W (zero-sized if off)
    vector[J_bc] w_J1;                 // donor-to-treated column of W
    real<lower=-1, upper=1> rho_bc;    // rho used for bias correction
+
+   // ---- Optional predictor-importance weights for augmented matching ----
+   // N_outcome = N when no covariate rows are appended (default).
+   // When N_outcome < N, rows N_outcome+1..N are appended covariate-mean
+   // rows and v_aug provides their per-row V-matrix entries.
+   int<lower=1, upper=N> N_outcome;
+   vector<lower=0>[N - N_outcome] v_aug;
 }
 
 transformed data{ // normalize using pre-treatment values
@@ -74,7 +93,20 @@ parameters {
 model {
    // Priors.
    sigma ~ normal(0,1);
-   target += normal_lpdf(y_std | X_std*w, sigma);
+
+   // Outcome rows: equal weight (implicit V = 1).
+   target += normal_lpdf(y_std[1:N_outcome] | X_std[1:N_outcome, ] * w, sigma);
+
+   // Augmented covariate-matching rows: per-row V-weighted precision.
+   // sigma_k = sigma / sqrt(v_aug[k]); v_aug[k] = 0 -> row dropped from loss.
+   for (k in 1:(N - N_outcome)) {
+      if (v_aug[k] > 0) {
+         int row_idx = N_outcome + k;
+         target += normal_lpdf(y_std[row_idx] |
+                               dot_product(X_std[row_idx, ], w),
+                               sigma / sqrt(v_aug[k]));
+      }
+   }
 }
 
 generated quantities {

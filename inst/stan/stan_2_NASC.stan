@@ -19,6 +19,15 @@
 //   it enters the likelihood on the same dimensionless scale as the outcome
 //   features. K_cov = 0 disables the augmented matching and reproduces the
 //   pre-existing behavior exactly.
+//
+// PREDICTOR IMPORTANCE WEIGHTS (v_cov):
+//   Optional length-K_cov non-negative vector that re-weights each covariate
+//   row's contribution to the matching loss, mirroring the V-matrix in the
+//   classical Abadie-Diamond-Hainmueller SCM and bsynth's `vs` argument.
+//   The k-th covariate row is treated as Normal(., sigma_sc / sqrt(v_cov[k]))
+//   so v_cov[k] = 1 (default) recovers equal weighting and v_cov[k] = 0
+//   removes covariate k from the matching loss without dropping it from the
+//   data. Outcome rows always have implicit weight 1.
 
 data {
   // NASC Specific Data
@@ -45,6 +54,7 @@ data {
   int<lower=0> K_cov;
   matrix[K_cov, J] X_cov0;       // Donor covariate means (pre-treatment)
   vector[K_cov] X_cov1;          // Treated covariate means (pre-treatment)
+  vector<lower=0>[K_cov] v_cov;  // Per-covariate importance weights (V matrix diagonal)
 }
 
 transformed data {
@@ -118,10 +128,17 @@ model {
   // Likelihood, augmented by covariate-matching rows when K_cov > 0.
   // Outcome rows: y_pre_std[t] ~ Normal(X_pre_std[t, ] * w, sigma_sc)
   target += normal_lpdf(y_pre_std | X_pre_std * w, sigma_sc);
-  // Covariate rows: X_cov1_std[k] ~ Normal(X_cov0_std[k, ] * w, sigma_sc)
-  // The K_cov = 0 case contributes nothing (zero-length lpdf).
-  if (K_cov > 0)
-    target += normal_lpdf(X_cov1_std | X_cov0_std * w, sigma_sc);
+  // Covariate rows: X_cov1_std[k] ~ Normal(X_cov0_std[k, ] * w,
+  //                                        sigma_sc / sqrt(v_cov[k]))
+  // Higher v_cov[k] => tighter implied SD => stronger matching pressure
+  // on covariate k. v_cov[k] = 0 => infinite SD => row contributes 0
+  // (covariate effectively excluded). The K_cov = 0 case skips the loop.
+  for (k in 1:K_cov) {
+    if (v_cov[k] > 0)
+      target += normal_lpdf(X_cov1_std[k] |
+                            dot_product(X_cov0_std[k, ], w),
+                            sigma_sc / sqrt(v_cov[k]));
+  }
 }
 
 generated quantities {
