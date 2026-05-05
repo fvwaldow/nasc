@@ -547,7 +547,7 @@ nascSynth <- R6::R6Class(
             names(beta_identified) <- cov_names
             if (any(!beta_identified)) {
               message(sprintf(
-                "%d time-invariant covariate(s) detected; beta posteriors for these will be unidentified (equal to the prior): %s",
+                "%d time-invariant %s covariate(s) detected; posteriors are not identified",
                 sum(!beta_identified),
                 paste(cov_names[!beta_identified], collapse = ", ")
               ))

@@ -45,7 +45,14 @@
 
     run_worker <- function(single_rho, base_data, step2_mod, rho_field,
                            extract_pars, worker_iter, worker_warmup) {
-      suppressPackageStartupMessages(require(rstan, quietly = TRUE))
+      # Silence "package built under R version X.Y.Z" warnings emitted at
+      # worker startup. This is scoped to the package-load call only and
+      # does NOT swallow Stan diagnostics (divergences, treedepth, low BFMI,
+      # Rhat, n_eff): those are emitted via message() / Stan's own logging
+      # channels, not warning(), so suppressWarnings() does not touch them.
+      suppressWarnings(
+        suppressPackageStartupMessages(require(rstan, quietly = TRUE))
+      )
       worker_data <- base_data
       worker_data[[rho_field]] <- single_rho
 
@@ -92,26 +99,43 @@
     }
 
     progressr::handlers(global = TRUE)
-    results_list <- progressr::with_progress({
-      p <- progressr::progressor(steps = length(rhos))
-      furrr::future_map(
-        rhos,
-        function(rho) {
-          res <- run_worker(
-            single_rho    = rho,
-            base_data     = base_data,
-            step2_mod     = step2_mod,
-            rho_field     = rho_field,
-            extract_pars  = extract_pars,
-            worker_iter   = worker_iter,
-            worker_warmup = worker_warmup
-          )
-          p()
-          res
-        },
-        .options = furrr::furrr_options(seed = TRUE, packages = "rstan")
-      )
-    })
+    # Filter only the "package built under R version X.Y.Z" warnings raised
+    # by worker spin-up (these come from R's package-loading machinery for
+    # rstan / StanHeaders / future / purrr and are pure version cosmetics).
+    # All other warnings -- including Stan numerical issues that might also
+    # be raised as conditions -- pass through unchanged. Stan's sampling
+    # diagnostics (divergences, treedepth, Rhat, n_eff) use message() and
+    # Stan's own logging, not warning(), so they are unaffected either way.
+    .is_build_version_warning <- function(w) {
+      msg <- conditionMessage(w)
+      grepl("built under R version", msg, fixed = TRUE) ||
+        grepl("wurde unter R Version",  msg, fixed = TRUE)  # German locale
+    }
+    results_list <- withCallingHandlers(
+      progressr::with_progress({
+        p <- progressr::progressor(steps = length(rhos))
+        furrr::future_map(
+          rhos,
+          function(rho) {
+            res <- run_worker(
+              single_rho    = rho,
+              base_data     = base_data,
+              step2_mod     = step2_mod,
+              rho_field     = rho_field,
+              extract_pars  = extract_pars,
+              worker_iter   = worker_iter,
+              worker_warmup = worker_warmup
+            )
+            p()
+            res
+          },
+          .options = furrr::furrr_options(seed = TRUE, packages = "rstan")
+        )
+      }),
+      warning = function(w) {
+        if (.is_build_version_warning(w)) invokeRestart("muffleWarning")
+      }
+    )
 
     out <- list()
     for (par in extract_pars) {
