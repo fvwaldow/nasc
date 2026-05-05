@@ -59,7 +59,9 @@ nascSynth <- R6::R6Class(
     treated_ids = NULL,
     donor_ids   = NULL,
     uses_rho   = NULL,
-    uses_step1 = NULL
+    uses_step1 = NULL,
+    beta_identified = NULL,
+    cov_names = NULL
   ),
   active = list(
     #' @field plotData Tibble with observed and counterfactual outcomes
@@ -406,8 +408,8 @@ nascSynth <- R6::R6Class(
       W_full   <- NULL
       lambda_W <- NULL
       Y_panel  <- NULL
-      X0_mat   <- NULL
-      X1_vec   <- NULL
+      X0_arr   <- NULL
+      X1_arr   <- NULL
       K_pred   <- 0L
 
       if (private$uses_rho) {
@@ -428,45 +430,110 @@ nascSynth <- R6::R6Class(
           }
           lambda_W <- Re(ev)
 
-          if (is.null(private$covariates)) {
-            stop("SAR/SDM Step 1 requires 'covariates'. Either supply ",
-                 "covariates or pass an exogenous rho.")
-          }
-          cov_names <- setdiff(
-            names(private$covariates),
-            c(rlang::as_name(private$time), rlang::as_name(private$id))
-          )
-          if (length(cov_names) == 0L) {
-            stop("'covariates' contains no predictor columns (only time/id found).")
-          }
-          cov_wide <- private$covariates |>
-            dplyr::filter(!!private$time < private$intervention) |>
-            dplyr::group_by(!!private$id) |>
-            dplyr::summarise(
-              dplyr::across(dplyr::all_of(cov_names), mean),
-              .groups = "drop"
-            ) |>
-            tidyr::pivot_longer(
-              cols      = dplyr::all_of(cov_names),
-              names_to  = ".covariate",
-              values_to = ".value"
-            ) |>
-            tidyr::pivot_wider(
-              names_from  = !!private$id,
-              values_from = .value
+          # Covariates are optional. The unified within-SAR model accepts
+          # K_pred = 0 (rho identified from Y alone after the within
+          # transform). When covariates are supplied, time-invariant ones
+          # are *not* dropped: they are passed through to Stan, where the
+          # within transform zeros them out and the corresponding beta[k]
+          # posterior reverts to its prior. We emit an informational
+          # message naming any such covariates so users know their beta
+          # is not identified by the data.
+          cov_names <- if (is.null(private$covariates)) {
+            character(0)
+          } else {
+            setdiff(
+              names(private$covariates),
+              c(rlang::as_name(private$time), rlang::as_name(private$id))
             )
-          pred_names <- cov_wide$.covariate
-          cov_wide   <- cov_wide |> dplyr::select(-.covariate)
-
-          X0_mat <- as.matrix(cov_wide[, donor_ids,  drop = FALSE])
-          X1_vec <- as.numeric(cov_wide[[treated_id]])
-          K_pred <- length(pred_names)
-
-          if (length(X1_vec) != K_pred) {
-            stop("Treated unit predictor vector length does not match K_pred.")
           }
-          if (anyNA(X0_mat) || anyNA(X1_vec)) {
-            stop("Missing values found in predictor matrix; please impute or drop.")
+
+          T0_n       <- nrow(pre_data)
+          unit_order <- c(donor_ids, treated_id)
+          N_units    <- length(unit_order)
+          J_n        <- length(donor_ids)
+          treated_i  <- N_units                          # treated is last in unit_order
+
+          if (length(cov_names) > 0L) {
+            # --------------------------------------------------------------
+            # Build a (K_pred x N x T0) covariate tensor over the pre-period.
+            # Unit ordering is (donors..., treated) to match Y_panel and W_full.
+            # --------------------------------------------------------------
+            cov_pre <- private$covariates |>
+              dplyr::filter(!!private$time < private$intervention)
+
+            expected_rows <- N_units * T0_n
+            if (nrow(cov_pre) != expected_rows) {
+              stop(sprintf(
+                "Covariate panel is unbalanced: expected %d rows (%d units x %d periods), got %d.",
+                expected_rows, N_units, T0_n, nrow(cov_pre)
+              ))
+            }
+
+            X_kit <- array(
+              NA_real_,
+              dim = c(length(cov_names), N_units, T0_n),
+              dimnames = list(cov_names, unit_order, NULL)
+            )
+            for (k_idx in seq_along(cov_names)) {
+              v <- cov_names[k_idx]
+              wide_kt <- cov_pre |>
+                dplyr::select(!!private$id, !!private$time, dplyr::all_of(v)) |>
+                tidyr::pivot_wider(
+                  names_from  = !!private$id,
+                  values_from = dplyr::all_of(v)
+                ) |>
+                dplyr::arrange(!!private$time)
+              mat_tn <- as.matrix(wide_kt[, unit_order, drop = FALSE])  # T0 x N
+              X_kit[k_idx, , ] <- t(mat_tn)                              # N x T0
+            }
+            if (anyNA(X_kit)) {
+              stop("Missing values in the covariate panel after reshape; please impute or drop.")
+            }
+
+            # --------------------------------------------------------------
+            # Diagnose which covariates have no within-unit variation.
+            # We do NOT drop them; we just record the mask and inform.
+            # The within transform will zero them out inside Stan, and
+            # the corresponding beta[k] posterior will equal the prior.
+            # --------------------------------------------------------------
+            within_var <- vapply(seq_along(cov_names), function(k) {
+              m  <- X_kit[k, , , drop = TRUE]                # N x T0
+              rm <- rowMeans(m)
+              mean(rowSums((m - rm)^2) / max(T0_n - 1L, 1L)) # avg within-unit variance
+            }, numeric(1))
+            beta_identified <- within_var > 1e-10
+            names(beta_identified) <- cov_names
+            if (any(!beta_identified)) {
+              message(sprintf(
+                "%d time-invariant covariate(s) detected; beta posteriors for these will be unidentified (equal to the prior): %s",
+                sum(!beta_identified),
+                paste(cov_names[!beta_identified], collapse = ", ")
+              ))
+            }
+            private$beta_identified <- beta_identified
+            private$cov_names       <- cov_names
+          } else {
+            private$beta_identified <- logical(0)
+            private$cov_names       <- character(0)
+          }
+          K_pred <- length(cov_names)
+
+          # ----------------------------------------------------------------
+          # Reshape to Stan's expected layouts:
+          #   X1: array[T0] vector[K_pred]    -> R matrix [T0, K_pred]
+          #   X0: array[T0] matrix[K_pred, J] -> R array  [T0, K_pred, J]
+          # K_pred = 0 is supported via zero-sized arrays.
+          # ----------------------------------------------------------------
+          if (K_pred == 0L) {
+            X1_arr <- matrix(numeric(0), nrow = T0_n, ncol = 0)
+            X0_arr <- array(numeric(0), dim = c(T0_n, 0, J_n))
+          } else {
+            X1_arr <- matrix(NA_real_, nrow = T0_n, ncol = K_pred)
+            X0_arr <- array(NA_real_, dim = c(T0_n, K_pred, J_n))
+            for (t in seq_len(T0_n)) {
+              X1_arr[t, ]   <- X_kit[, treated_i, t]
+              X0_arr[t, , ] <- X_kit[, seq_len(J_n), t]
+            }
           }
 
           Y_panel <- t(as.matrix(
@@ -487,11 +554,11 @@ nascSynth <- R6::R6Class(
 
           step1_data <- list(
             K_pred   = K_pred,
-            X1       = X1_vec,
             J        = length(donor_ids),
-            X0       = X0_mat,
             T0       = nrow(pre_data),
-            Y_panel  = Y_panel,
+            X1       = X1_arr,         # T0 x K_pred       -> array[T0] vector[K_pred]
+            X0       = X0_arr,         # T0 x K_pred x J   -> array[T0] matrix[K_pred, J]
+            Y_panel  = Y_panel,        # (J+1) x T0
             W        = W_full,
             lambda_W = lambda_W
           )
@@ -903,7 +970,14 @@ nascSynth <- R6::R6Class(
     #' \itemize{
     #'   \item \code{rho}             -- Step-1 spatial autocorrelation (SAR/SDM).
     #'   \item \code{theta[k]}        -- Step-1 SDM spillover coefficients
-    #'                                   (one panel per covariate).
+    #'                                   (one panel per covariate). Labelled
+    #'                                   by covariate name when available.
+    #'   \item \code{beta[k]}         -- Step-1 SAR within-model covariate
+    #'                                   coefficients (one panel per covariate).
+    #'                                   Labelled by covariate name when
+    #'                                   available. Time-invariant covariates
+    #'                                   are not identified under the within
+    #'                                   transform and are skipped.
     #'   \item \code{sigma_step1}     -- Step-1 residual SD (SAR or SDM).
     #'   \item \code{lambda}          -- Step-2 NASC penalty strength
     #'                                   (when \code{nasc_penalty = TRUE}).
@@ -954,12 +1028,61 @@ nascSynth <- R6::R6Class(
       # per component so the visualization is meaningful.
       if (!is.null(step1_draws$theta)) {
         th <- step1_draws$theta
+        th_labels <- if (!is.null(private$cov_names) &&
+                         is.matrix(th) &&
+                         length(private$cov_names) == ncol(th)) {
+          sprintf("theta[%s]", private$cov_names)
+        } else if (is.matrix(th)) {
+          sprintf("theta[%d]", seq_len(ncol(th)))
+        } else {
+          "theta"
+        }
         if (is.matrix(th)) {
           for (k in seq_len(ncol(th))) {
-            add_panel(sprintf("theta[%d]", k), th[, k])
+            col_k <- th[, k]
+            if (any(is.finite(col_k))) {
+              add_panel(th_labels[k], col_k)
+            }
           }
         } else {
-          add_panel("theta", th)
+          if (any(is.finite(th))) add_panel(th_labels, th)
+        }
+      }
+
+      # beta is a vector (n_draws x K_pred) in the SAR within-transformed model.
+      # Time-invariant covariates have unidentified beta (posterior == prior);
+      # private$beta_identified flags which columns to actually plot. We also
+      # skip any column that is entirely NA / non-finite to be safe.
+      if (!is.null(step1_draws$beta)) {
+        bt <- step1_draws$beta
+        # Resolve labels and identification mask
+        K_b <- if (is.matrix(bt)) ncol(bt) else 1L
+        b_labels <- if (!is.null(private$cov_names) &&
+                        length(private$cov_names) == K_b) {
+          sprintf("beta[%s]", private$cov_names)
+        } else if (K_b > 1L) {
+          sprintf("beta[%d]", seq_len(K_b))
+        } else {
+          "beta"
+        }
+        b_keep <- if (!is.null(private$beta_identified) &&
+                      length(private$beta_identified) == K_b) {
+          private$beta_identified
+        } else {
+          rep(TRUE, K_b)
+        }
+        if (is.matrix(bt)) {
+          for (k in seq_len(K_b)) {
+            if (!isTRUE(b_keep[k])) next
+            col_k <- bt[, k]
+            if (any(is.finite(col_k))) {
+              add_panel(b_labels[k], col_k)
+            }
+          }
+        } else {
+          if (isTRUE(b_keep[1]) && any(is.finite(bt))) {
+            add_panel(b_labels, bt)
+          }
         }
       }
 

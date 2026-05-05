@@ -1,80 +1,135 @@
-// Step 1: Pure Spatial Durbin Model (SDM) Panel Estimation
-// Fully standardized internally using the global pre-treatment period
-// Used to get an unbiased posterior distribution of 'rho'
+// Panel Spatial Durbin Model (SDM) -- Within (two-way demeaned).
+//
+// Single regime: always applies the two-way within transform to Y, WY,
+// X, and WX. Unit + time fixed effects are absorbed by the projection.
+//
+// Behavior on time-invariant covariates:
+//   The within transform maps any time-invariant column of X to zero.
+//   Since W does not introduce time variation, the corresponding column
+//   of WX is also time-invariant and likewise zeroed. Both beta[k] and
+//   theta[k] therefore drop out of the likelihood and their posteriors
+//   revert to their priors. This is harmless for rho and for time-varying
+//   coefficients; the calling R code is responsible for flagging the
+//   affected beta[k] / theta[k] as not-identified (NA) post-hoc.
+//
+// Edge case K_pred = 0: no covariates supplied, model still identifies
+// rho from the within-transformed Y alone. beta and theta are length-0.
 
 data {
-  int<lower=1> K_pred;
-  vector[K_pred] X1;            // Treated unit covariates
+  int<lower=0> K_pred;
   int<lower=0> J;
-  matrix[K_pred, J] X0;         // Donor unit covariates
-
   int<lower=1> T0;
-  matrix[J + 1, T0] Y_panel;    // Pre-treatment outcomes for all units
-  matrix[J + 1, J + 1] W;       // Spatial weight matrix
-  vector[J + 1] lambda_W;       // Eigenvalues of W
+
+  array[T0] vector[K_pred] X1;
+  array[T0] matrix[K_pred, J] X0;
+
+  matrix[J + 1, T0] Y_panel;
+  matrix[J + 1, J + 1] W;
+  vector[J + 1] lambda_W;
 }
 
 transformed data {
-  // --- 1. Combine and Standardize Covariates ---
-  matrix[J + 1, K_pred] X_full_raw;
-  matrix[J + 1, K_pred] X_full_std;
+  int N = J + 1;
 
+  // ---- Standardize Y by grand pre-treatment mean / SD ----
+  real mean_y = mean(to_vector(Y_panel));
+  real sd_y   = sd(to_vector(Y_panel));
+  matrix[N, T0] Y_std  = (Y_panel - mean_y) / sd_y;
+  matrix[N, T0] WY_std = W * Y_std;
+
+  // ---- Assemble + standardize the covariate tensor X_full_std ----
+  array[K_pred] matrix[N, T0] X_full_std;
   for (k in 1:K_pred) {
-    X_full_raw[1:J, k] = to_vector(X0[k, ]);
-    X_full_raw[J + 1, k] = X1[k];
-
-    // Calculate grand mean and SD across all units
-    real mean_k = mean(X_full_raw[, k]);
-    real sd_k = sd(X_full_raw[, k]);
-
-    // Mean-center and scale
-    X_full_std[, k] = (X_full_raw[, k] - mean_k) / sd_k;
+    matrix[N, T0] Xk;
+    for (t in 1:T0) {
+      for (j in 1:J)
+        Xk[j, t] = X0[t, k, j];
+      Xk[N, t] = X1[t, k];
+    }
+    real m = mean(to_vector(Xk));
+    real s = sd(to_vector(Xk));
+    X_full_std[k] = s > 1e-12 ? (Xk - m) / s : rep_matrix(0.0, N, T0);
   }
 
-  // --- 2. Standardize Outcomes ---
-  matrix[J + 1, T0] Y_panel_std;
-  real mean_y = mean(to_vector(Y_panel));
-  real sd_y = sd(to_vector(Y_panel));
+  // ---- Compute spatial lag WX in the standardized covariate space ----
+  // (W applied along the unit dimension, period-by-period)
+  array[K_pred] matrix[N, T0] WX_full_std;
+  for (k in 1:K_pred)
+    WX_full_std[k] = W * X_full_std[k];
 
-  for (j in 1:(J + 1)) {
-    for (t in 1:T0) {
-      Y_panel_std[j, t] = (Y_panel[j, t] - mean_y) / sd_y;
+  // ---- Two-way within transform on Y, WY, each X_k, each WX_k ----
+  matrix[N, T0] Y_within;
+  matrix[N, T0] WY_within;
+  array[K_pred] matrix[N, T0] X_within;
+  array[K_pred] matrix[N, T0] WX_within;
+  {
+    // Y
+    vector[N]      row_means_Y  = Y_std * rep_vector(1.0 / T0, T0);
+    row_vector[T0] col_means_Y  = rep_row_vector(1.0 / N, N) * Y_std;
+    real           grand_Y      = mean(to_vector(Y_std));
+    for (i in 1:N)
+      for (t in 1:T0)
+        Y_within[i, t] = Y_std[i, t] - row_means_Y[i] - col_means_Y[t] + grand_Y;
+
+    // WY
+    vector[N]      row_means_WY = WY_std * rep_vector(1.0 / T0, T0);
+    row_vector[T0] col_means_WY = rep_row_vector(1.0 / N, N) * WY_std;
+    real           grand_WY     = mean(to_vector(WY_std));
+    for (i in 1:N)
+      for (t in 1:T0)
+        WY_within[i, t] = WY_std[i, t] - row_means_WY[i] - col_means_WY[t] + grand_WY;
+
+    // X_k and WX_k
+    for (k in 1:K_pred) {
+      // X
+      vector[N]      row_means_X = X_full_std[k] * rep_vector(1.0 / T0, T0);
+      row_vector[T0] col_means_X = rep_row_vector(1.0 / N, N) * X_full_std[k];
+      real           grand_X     = mean(to_vector(X_full_std[k]));
+      for (i in 1:N)
+        for (t in 1:T0)
+          X_within[k, i, t] = X_full_std[k, i, t]
+                              - row_means_X[i] - col_means_X[t] + grand_X;
+
+      // WX
+      vector[N]      row_means_WX = WX_full_std[k] * rep_vector(1.0 / T0, T0);
+      row_vector[T0] col_means_WX = rep_row_vector(1.0 / N, N) * WX_full_std[k];
+      real           grand_WX     = mean(to_vector(WX_full_std[k]));
+      for (i in 1:N)
+        for (t in 1:T0)
+          WX_within[k, i, t] = WX_full_std[k, i, t]
+                               - row_means_WX[i] - col_means_WX[t] + grand_WX;
     }
   }
-
-  // --- 3. Precompute Spatial Lags (Highly Optimized) ---
-  // Apply W to the standardized Y and standardized X
-  matrix[J + 1, T0] WY_panel = W * Y_panel_std;
-  matrix[J + 1, K_pred] WX_full_std = W * X_full_std;
 }
 
 parameters {
-  real<lower=-1, upper=1> rho;  // Global spatial autocorrelation
-  vector[K_pred] beta;          // Direct effects
-  vector[K_pred] theta;         // Indirect (spillover) effects
-  real<lower=0> sigma_sdm;      // Error standard deviation
-
-  // NOTE: 'alpha' is completely removed because all data has a mean of 0.
+  real<lower=-1, upper=1> rho;
+  vector[K_pred] beta;          // Direct effects of own X
+  vector[K_pred] theta;         // Indirect (spillover) effects of WX
+  real<lower=0> sigma_sdm;
 }
 
 model {
-  // --- Priors ---
-  // Adjusted to normal(0, 1) because all inputs are strictly standardized
+  // ---- Priors ----
   sigma_sdm ~ normal(0, 1);
-  beta ~ normal(0, 1);
-  theta ~ normal(0, 1);
+  beta      ~ normal(0, 1);
+  theta     ~ normal(0, 1);
 
-  // --- OPTIMIZED SDM Likelihood ---
-  // Jacobian penalty to guarantee an unbiased rho
-  real log_det_A = sum(log(1 - rho * lambda_W));
+  // ---- Jacobian for Y -> (I - rho W) Y, applied each period ----
+  real log_det_A = sum(log1m(rho * lambda_W));
   target += T0 * log_det_A;
 
-  // Isolate the errors (AY) and calculate the expected mean
-  matrix[J + 1, T0] AY = Y_panel_std - rho * WY_panel;
+  // ---- Within-SDM likelihood ----
+  // Q Y = rho * Q (W Y) + Q X beta + Q (W X) theta + Q e
+  matrix[N, T0] mu_lp = rho * WY_within;
+  for (k in 1:K_pred) {
+    mu_lp += beta[k]  * X_within[k];
+    mu_lp += theta[k] * WX_within[k];
+  }
 
-  // Expected mean based on own traits (beta) and neighbors' traits (theta)
-  vector[J + 1] sdm_mean = X_full_std * beta + WX_full_std * theta;
+  target += normal_lpdf(to_vector(Y_within - mu_lp) | 0, sigma_sdm);
+}
 
-  // Evaluate likelihood
-  target += normal_lpdf(to_vector(AY) | to_vector(rep_matrix(sdm_mean, T0)), sigma_sdm);
+generated quantities {
+  real rho_out = rho;
 }
