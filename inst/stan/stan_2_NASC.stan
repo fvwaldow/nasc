@@ -8,6 +8,17 @@
 //
 // Generated-quantity names (y_sim_pre, y_counterfactual) match model1.stan so
 // a single R post-processing path handles both.
+//
+// COVARIATE MATCHING (new):
+//   This file now mirrors model1.stan's optional augmented matching: when
+//   covariates are supplied, the simplex weights w must reconcile not only
+//   the pre-treatment outcome trajectory but also the pre-period covariate
+//   means of the treated unit against a w-weighted mix of donor covariate
+//   means. Each covariate is standardized by its donor-side mean/SD (the
+//   treated value is standardized by the same donor-derived statistics) so
+//   it enters the likelihood on the same dimensionless scale as the outcome
+//   features. K_cov = 0 disables the augmented matching and reproduces the
+//   pre-existing behavior exactly.
 
 data {
   // NASC Specific Data
@@ -28,6 +39,12 @@ data {
   // Bias-correction toggle. Penalty toggle has been removed: this file is
   // only used when the penalty is on.
   int<lower=0, upper=1> use_bias_correction;
+
+  // ---- Optional covariate-matching inputs ----
+  // K_cov = 0 disables the augmented matching (zero-sized arrays).
+  int<lower=0> K_cov;
+  matrix[K_cov, J] X_cov0;       // Donor covariate means (pre-treatment)
+  vector[K_cov] X_cov1;          // Treated covariate means (pre-treatment)
 }
 
 transformed data {
@@ -56,6 +73,28 @@ transformed data {
   }
 
   // -------------------------------------------------------------
+  // PREPARE COVARIATE-MATCHING ROWS (standardized)
+  // For each covariate k, compute donor-side mean/SD across the J
+  // donor values, then standardize both the donor row (X_cov0) and
+  // the treated scalar (X_cov1) by the same statistics. Guard SDs
+  // near zero so a constant covariate produces a zero residual
+  // rather than a NaN.
+  // -------------------------------------------------------------
+  matrix[K_cov, J] X_cov0_std;
+  vector[K_cov] X_cov1_std;
+  for (k in 1:K_cov) {
+    real m_k = mean(X_cov0[k, ]);
+    real s_k = sd(X_cov0[k, ]);
+    if (s_k > 1e-12) {
+      X_cov0_std[k, ] = (X_cov0[k, ] - m_k) / s_k;
+      X_cov1_std[k]   = (X_cov1[k]    - m_k) / s_k;
+    } else {
+      X_cov0_std[k, ] = rep_row_vector(0.0, J);
+      X_cov1_std[k]   = 0.0;
+    }
+  }
+
+  // -------------------------------------------------------------
   // CONTAMINATION VECTOR s (always needed: penalty uses |s|)
   // -------------------------------------------------------------
   vector[J] s = rho * mdivide_left(I_J - rho * W_J, w_J1);
@@ -76,8 +115,13 @@ model {
   // NASC Penalty (always on in this file)
   target += -lambda * dot_product(w, s_abs);
 
-  // Likelihood: standardized treated outcome ~ Normal(standardized donor mix, sigma_sc)
+  // Likelihood, augmented by covariate-matching rows when K_cov > 0.
+  // Outcome rows: y_pre_std[t] ~ Normal(X_pre_std[t, ] * w, sigma_sc)
   target += normal_lpdf(y_pre_std | X_pre_std * w, sigma_sc);
+  // Covariate rows: X_cov1_std[k] ~ Normal(X_cov0_std[k, ] * w, sigma_sc)
+  // The K_cov = 0 case contributes nothing (zero-length lpdf).
+  if (K_cov > 0)
+    target += normal_lpdf(X_cov1_std | X_cov0_std * w, sigma_sc);
 }
 
 generated quantities {

@@ -639,6 +639,49 @@ nascSynth <- R6::R6Class(
 
       # STEP 2
       if (private$nasc_penalty) {
+        # ----------------------------------------------------------------
+        # Optional covariate-matching rows for stan_2_NASC.stan.
+        # Pre-treatment unit means of each covariate are passed as additional
+        # matching moments, mirroring the use_covariate_rows logic on the
+        # nasc_penalty = FALSE path. K_cov = 0 -> no augmented matching.
+        # ----------------------------------------------------------------
+        if (!is.null(private$covariates)) {
+          cov_names_step2 <- setdiff(
+            names(private$covariates),
+            c(rlang::as_name(private$time), rlang::as_name(private$id))
+          )
+        } else {
+          cov_names_step2 <- character(0)
+        }
+        if (length(cov_names_step2) > 0L) {
+          cov_means <- private$covariates |>
+            dplyr::filter(!!private$time < private$intervention) |>
+            dplyr::group_by(!!private$id) |>
+            dplyr::summarise(
+              dplyr::across(dplyr::all_of(cov_names_step2), mean),
+              .groups = "drop"
+            ) |>
+            tidyr::pivot_longer(
+              cols      = dplyr::all_of(cov_names_step2),
+              names_to  = ".covariate",
+              values_to = ".value"
+            ) |>
+            tidyr::pivot_wider(
+              names_from  = !!private$id,
+              values_from = .value
+            )
+          K_cov_step2 <- nrow(cov_means)
+          X_cov0_mat  <- as.matrix(cov_means[, donor_ids,  drop = FALSE])
+          X_cov1_vec  <- as.numeric(cov_means[[treated_id]])
+          if (anyNA(X_cov0_mat) || anyNA(X_cov1_vec)) {
+            stop("Missing values in covariate-matching rows for Step 2; please impute or drop.")
+          }
+        } else {
+          K_cov_step2 <- 0L
+          X_cov0_mat  <- matrix(numeric(0), nrow = 0, ncol = length(donor_ids))
+          X_cov1_vec  <- numeric(0)
+        }
+
         base_data <- list(
           J                   = length(donor_ids),
           T0                  = nrow(pre_data),
@@ -652,7 +695,10 @@ nascSynth <- R6::R6Class(
           # and Stan would reject vector[1] declarations). No effect when
           # length > 1.
           Y1_post             = as.array(as.numeric(post_data |> dplyr::pull(!!private$outcome))),
-          use_bias_correction = as.integer(private$bias_correction)
+          use_bias_correction = as.integer(private$bias_correction),
+          K_cov               = K_cov_step2,
+          X_cov0              = X_cov0_mat,
+          X_cov1              = if (K_cov_step2 > 0L) as.array(X_cov1_vec) else numeric(0)
         )
 
         results <- .run_step2_loop(
