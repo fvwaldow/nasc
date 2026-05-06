@@ -1,28 +1,5 @@
-# compare_plots.R
+# Comparison Plots of Multiple NASC Models
 
-#' Compare Multiple NASC Models
-#'
-#' @description
-#' Produces comparative base R plots overlaying the results of multiple fitted
-#' \code{nascSynth} objects. Useful for comparing configurations such as
-#' Conventional SC, Bias-Corrected SC, NASC, and Fully NASC.
-#'
-#' @param models A named list of fitted \code{nascSynth} objects. The names of
-#'   the list are used as the legend labels.
-#' @param show_ci Logical. If \code{TRUE}, adds shaded credible-interval bands
-#'   (\code{LB}, \code{UB}, \code{tau_LB}, \code{tau_UB}). Defaults to
-#'   \code{FALSE} because overlapping bands can be hard to read.
-#'
-#' @details
-#' Draws plots directly to the active graphics device using base R. Two plots
-#' are produced in sequence (synthetic, then direct effect). Use
-#' \code{par(mfrow = c(1, 2))} or \code{dev.new()} between calls if you want
-#' them side by side or in separate windows.
-#'
-#' @return Invisibly returns \code{NULL}. Called for its side effect of
-#'   drawing plots.
-#'
-#' @export
 nascPlot <- function(models, show_ci = FALSE) {
 
   if (!is.list(models) || is.null(names(models))) {
@@ -145,50 +122,8 @@ nascPlot <- function(models, show_ci = FALSE) {
   invisible(NULL)
 }
 
-#' Compare Posterior Donor-Weight Distributions Across Models
-#'
-#' @description
-#' Ridgeline plot of posterior donor-weight densities, with one row per
-#' donor and one overlaid translucent density per model. Designed as the
-#' multi-model counterpart of \code{$weightDraws()} and as a companion
-#' to \code{nascPlot()}: model colours are drawn from the same
-#' \code{hcl.colors(palette = "Dark 3")} palette so that lines in
-#' \code{nascPlot()} and densities here can be cross-referenced at a
-#' glance.
-#'
-#' @details
-#' Donors are listed on the y-axis ordered by donor identifier, with
-#' the largest ID at the top and the smallest at the bottom. Numeric
-#' identifiers (or numeric-as-character such as \code{"1"}, \code{"2"},
-#' ..., \code{"20"}) are sorted numerically so \code{"20"} sits above
-#' \code{"3"}; otherwise the sort falls back to lexicographic order.
-#' When models use different donor pools, the union of donors is shown
-#' and a model that does not include a particular donor simply has no
-#' density drawn in that row.
-#'
-#' @param models A named list of fitted \code{nascSynth} objects. The
-#'   list names are used as legend labels and must be unique.
-#' @param overlap Numeric in \code{[0, 1)}. Fraction of vertical overlap
-#'   between adjacent donor rows. \code{0} reproduces a non-overlapping
-#'   layout; \code{0.5} (default) makes each ridge reach halfway into
-#'   the row above. See \code{$weightDraws()} for the same parameter.
-#' @param scale Numeric > 0. Multiplicative height of every ridge
-#'   relative to the baseline step. Default \code{1.4}.
-#' @param fill_alpha Numeric in \code{(0, 1]}. Alpha applied to the
-#'   fill colours; lower values make overlapping model ridges more
-#'   transparent. Default \code{0.45}, calibrated for readable overlap
-#'   at 2-4 models.
-#' @param max_donors Integer or \code{NULL}. If a positive integer,
-#'   restrict the plot to the \code{max_donors} donors with the
-#'   largest IDs (i.e. drop the smallest IDs from the bottom of the
-#'   plot). Default \code{NULL} (plot all donors).
-#'
-#' @return Invisibly returns a tibble with one row per (donor, model)
-#'   combination giving the posterior mean weight, standard deviation,
-#'   and the share of draws above \code{1e-3}. Rows are ordered to
-#'   match the plot, top-to-bottom (largest donor ID first).
-#'
-#' @export
+# Comparison Plot of Posterior Donor-Weight Distributions Across Models
+
 nascWeight <- function(models,
                        overlap     = 0.5,
                        scale       = 1.4,

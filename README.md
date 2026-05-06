@@ -32,9 +32,9 @@ pak::pkg_install("fvwaldow/nasc")
 
 As the package compiles Stan models at install time, a working C++
 toolchain and a recent version of
-[**rstan**](https://mc-stan.org/rstan/) is needed. The contamination
-network plot additionally depends on **igraph**, which can be installed
-with `install.packages("igraph")`.
+[**rstan**](https://mc-stan.org/rstan/) is needed. The contamination and
+effect network plots additionally depend on **igraph**, which can be
+installed with `install.packages("igraph")`.
 
 ## Quick Start
 
@@ -84,24 +84,39 @@ mod$effectPlot()                 # tau_t with credible interval
 ### Core functions
 
 The package exposes a single user-facing [**R6**](https://r6.r-lib.org/)
-class, `nascSynth`, several stand-alone diagnostic plot functions, and a
-comparison helper for overlaying several fitted models.
+class, `nascSynth`, several stand-alone diagnostic plot functions, and
+comparison helpers for overlaying several fitted models.
 
 | Function / method | Purpose |
 |----|----|
-| `nascSynth$new(...)` | Constructs an estimator. Selects a Stan model based on `spatial_model`, `bias_correction`, and `nasc_penalty` |
+| `nascSynth$new(...)` | Constructs an estimator. Selects a Stan model based on `spatial_model`, `bias_correction`, and `nasc_penalty`. Optionally accepts `predictor_weights` to set a diagonal V matrix on the covariate-matching loss in Step 2. |
 | `mod$fit(n_samples, n_samples_cap, n_samples_min, cores, worker_iter, worker_warmup, ...)` | Runs the (optional) Step 1 spatial model and the Step 2 synthetic-control model via MCMC |
-| `mod$summary(ci_width, print)` | Posterior summary: ATT, per-period τₜ, donor weights, model parameters, and MCMC diagnostics. Also dispatched via `summary(mod)` |
+| `mod$summary(ci_width, print)` | Posterior summary: ATT, per-period τₜ, donor weights, model parameters, and MCMC diagnostics. When the model uses a network, also reports per-period and per-donor indirect (spillover) effects and the average indirect effect. Also dispatched via `summary(mod)` |
+| `mod$indirectEffect()` | Posterior draws and summaries of the indirect (spillover) effect at the per-period and per-donor level. Returns `NULL` for non-network configurations |
 | `mod$updateWidth(ci_width)` | Recomputes credible intervals at a different width without re-running MCMC |
 | `mod$plotData` | Tibble of observed and counterfactual outcomes with credible-interval bounds |
 | `mod$interventionTime` | The first treatment period |
+
+#### `nascSynth$new()` arguments at a glance
+
+| Argument | Default | Description |
+|----|----|----|
+| `data`, `time`, `id`, `treated`, `outcome` | — | Long-format panel and column accessors. |
+| `ci_width` | `0.75` | Width of the credible interval. |
+| `covariates` | `NULL` | Long-format covariate panel. Required for `spatial_model = "SAR"` or `"SDM"`. |
+| `W` | `NULL` | Row-standardized spatial-weights matrix. Required when `bias_correction = TRUE` or `nasc_penalty = TRUE`. |
+| `spatial_model` | `"none"` | One of `"none"`, `"SAR"`, `"SDM"`, `"exogenous"`. |
+| `rho` | `NULL` | Optional scalar in (-1, 1). Required when `spatial_model = "exogenous"`; supplying it for any other choice skips Step 1. |
+| `bias_correction` | model-aware | `TRUE` for SAR/SDM/exogenous, `FALSE` for `"none"`. |
+| `nasc_penalty` | model-aware | Same default rule as `bias_correction`. |
+| `predictor_weights` | `NULL` | Optional non-negative numeric vector with one entry per covariate, equivalent to the diagonal of Abadie-Diamond-Hainmueller’s V matrix. `NULL` gives equal weight to every covariate; setting an entry to 0 drops that covariate from the matching loss. |
 
 #### `fit()` arguments
 
 | Argument | Default | Description |
 |----|----|----|
 | `n_samples` | `100` | Number of *ρ* draws propagated from Step 1 to Step 2. May be a positive integer or the string `"auto"` (see below). Ignored when *ρ* is exogenous or unused. |
-| `n_samples_cap` | `200` | Upper bound on the auto-selected `n_samples`. Only used when `n_samples = "auto"`. |
+| `n_samples_cap` | `500` | Upper bound on the auto-selected `n_samples`. Only used when `n_samples = "auto"`. |
 | `n_samples_min` | `30` | Lower bound on the auto-selected `n_samples`. Only used when `n_samples = "auto"`. |
 | `cores` | `detectCores() - 1` | Number of CPU cores for parallel execution. |
 | `worker_iter` | `2000` | Iterations per worker chain in the multi-*ρ* parallel loop. |
@@ -120,15 +135,17 @@ All plotting methods produce base R graphics.
 | Method / function | Output |
 |----|----|
 | `mod$syntheticPlot()` | Observed vs. synthetic outcome path with credible band |
-| `mod$effectPlot()` | Treatment effect τₜ over time with credible band and intervention line |
-| `mod$attPlot()` | Posterior density of the average treatment effect on the treated (ATT) |
-| `mod$tauPlot()` | Stacked posterior densities of period-by-period τₜ for all post-treatment periods |
-| `mod$posteriorPlot()` | Posterior densities of the estimated scalar parameters: *ρ*, *θ*ₖ (SDM only), `sigma_step1`, `lambda` (when `nasc_penalty = TRUE`), `sigma_step2`, and `bias_correction` (when `bias_correction = TRUE`). Each parameter only appears if the configuration actually estimated it. |
+| `mod$effectPlot()` | Direct treatment effect τₜ over time with credible band and intervention line |
+| `mod$attPlot(indirect)` | Posterior density of the ATT. When the model uses a network and `indirect = TRUE` (the default in that case), a second panel adds the average indirect (spillover) effect |
+| `mod$tauPlot(indirect)` | Stacked posterior densities of period-by-period τₜ. When the model uses a network and `indirect = TRUE` (default), a second column shows the per-period donor-average indirect effect |
+| `mod$posteriorPlot()` | Posterior densities of the estimated scalar parameters: *ρ*, *θ*ₖ (SDM only), *β*ₖ (SAR only, time-invariant covariates skipped), `sigma_step1`, `lambda` (when `nasc_penalty = TRUE`), `sigma_step2`, and `bias_correction` (when `bias_correction = TRUE`). Each parameter only appears if the configuration actually estimated it. |
 | `mod$weightDraws()` | Ridge-style densities of donor weights across posterior draws |
 | `mod$weightCorr()` | Heatmap of correlations between donor weights across draws |
-| `contaminationPlot(model, ...)` | Spatial-weights graph with donor nodes coloured by posterior-mean contamination \|sⱼ\| (requires `igraph`) |
+| `contaminationGraph(model, ...)` | Spatial-weights graph with donor nodes coloured by posterior-mean contamination \|sⱼ\| (requires `igraph`) |
+| `effectGraph(model, ...)` | Spatial-weights graph with donor nodes coloured by posterior-mean indirect effect δ̄ⱼ and the treated node coloured by the ATT, on a shared diverging palette (requires `igraph`) |
 | `contaminationScatter(model, ...)` | Per-donor scatter of posterior-mean weight against posterior-mean contamination |
-| `nascPlot(models, show_ci)` | Overlays the synthetic and effect plots of a named list of fitted `nascSynth` objects |
+| `nascPlot(models, show_ci)` | Overlays the synthetic and direct-effect plots of a named list of fitted `nascSynth` objects |
+| `nascWeight(models, ...)` | Multi-model ridgeline of posterior donor-weight densities, one row per donor, one density per model, sharing the colour palette of `nascPlot()` |
 
 ## Methodological notes
 
@@ -148,17 +165,17 @@ skipped entirely.
 
 **Step 2 — NASC weight estimation.** Donor weights *w* are estimated on
 the pre-treatment outcome panel (and, when applicable, on covariate
-moments). The post-treatment counterfactual is reconstructed as a convex
-combination of the donor pool; if `bias_correction = TRUE`, it is
-rescaled by the bias-correction factor 1 / (1 − ⟨w, s⟩), so that
-contamination of the donor pool by spillovers from the treated unit is
-accounted for. If `nasc_penalty = TRUE`, the log-likelihood includes a
-penalty term −λ⟨w, \|s\|⟩, which discourages weight on units with strong
-network exposure to the treated unit. When several *ρ* draws are
-propagated from Step 1, Step 2 is run in parallel across them with
-`furrr` (one Stan fit per *ρ*, single-chain `worker_iter` iterations
-each) and the resulting posteriors are pooled to approximate the cut
-posterior.
+moments weighted by `predictor_weights`). The post-treatment
+counterfactual is reconstructed as a convex combination of the donor
+pool; if `bias_correction = TRUE`, it is rescaled by the bias-correction
+factor 1 / (1 − ⟨w, s⟩), so that contamination of the donor pool by
+spillovers from the treated unit is accounted for. If
+`nasc_penalty = TRUE`, the log-likelihood includes a penalty term −λ⟨w,
+\|s\|⟩, which discourages weight on units with strong network exposure
+to the treated unit. When several *ρ* draws are propagated from Step 1,
+Step 2 is run in parallel across them with `furrr` (one Stan fit per
+*ρ*, single-chain `worker_iter` iterations each) and the resulting
+posteriors are pooled to approximate the cut posterior.
 
 **Cut posterior.** *ρ* enters Step 2 as data, not as a parameter.
 Conditional on each *ρ* draw, Step 2’s likelihood and posterior are
@@ -167,6 +184,15 @@ spatial model. The final approximation to the cut posterior is the
 equally-weighted Monte Carlo mixture over the propagated *ρ* draws.
 Per-worker MCMC diagnostics (split-Rhat, n_eff, divergent transitions,
 max-treedepth saturation) are tracked and summarized by `mod$summary()`.
+
+**Indirect effects.** When the model uses a network, the per-donor
+spillover at post-period *t* is δᵢₜᴺᴬˢᶜ = sᵢ · τ₁ₜᴺᴬˢᶜ (Proposition
+6.2), with the contamination vector s = ρ (Iⱼ − ρWⱼ)⁻¹ wⱼ₁ pulled from
+each posterior draw. `mod$indirectEffect()` returns the full posterior
+tensor, while `summary()`, `attPlot()` and `tauPlot()` surface the
+per-period donor-average and the scalar average indirect effect (the
+spillover analog of the ATT). For a network-graph view, see
+`effectGraph()`.
 
 **Spatial weights.** The matrix `W` must be row-standardized and known a
 priori. The code checks this explicitly and aligns row/column names with

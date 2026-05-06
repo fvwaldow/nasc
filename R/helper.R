@@ -591,18 +591,8 @@
   out
 }
 
-#' Print method for nascSynth summary objects
-#'
-#' Prints every donor in the donor-weights and per-donor indirect-effect
-#' tables; no truncation option is exposed.
-#'
-#' @param x A \code{summary.nascSynth} object.
-#' @param digits Number of significant digits to display. Default \code{3}.
-#' @param ... Additional arguments (ignored). Calls written for older
-#'   versions of this method that passed \code{max_donors = ...} are
-#'   silently absorbed here without error.
-#' @return Invisibly returns \code{x}.
-#' @export
+# Print nascSynth summary objects
+
 print.summary.nascSynth <- function(x, digits = 3, ...) {
 
   h <- x$header
@@ -866,15 +856,8 @@ print.summary.nascSynth <- function(x, digits = 3, ...) {
   invisible(x)
 }
 
-#' Summary method for nascSynth objects
-#'
-#' Dispatches to the \code{$summary()} method of the
-#' \code{\link{nascSynth}} R6 object.
-#'
-#' @param object A \code{nascSynth} object.
-#' @param ... Additional arguments passed to \code{object$summary()}.
-#' @return Invisibly returns a \code{summary.nascSynth} list.
-#' @export
+# Summary method for nascSynth objects
+
 summary.nascSynth <- function(object, ...) {
   invisible(object$summary(...))
 }

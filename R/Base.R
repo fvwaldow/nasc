@@ -1,41 +1,6 @@
 # Bayesian NASC estimator
 # BASE code
 
-#' Bayesian Network-Aware Synthetic Control
-#'
-#' @description
-#' An R6 class implementing Bayesian Synthetic Control estimators with optional
-#' network/spatial awareness.
-#'
-#' Three orthogonal options govern how the spatial structure enters the
-#' estimator:
-#'
-#' \itemize{
-#'   \item \code{spatial_model}: \code{"none"}, \code{"SAR"}, \code{"SDM"}, or
-#'         \code{"exogenous"}. The first three behave as before; the last skips
-#'         Step 1 and uses a user-supplied scalar \code{rho}.
-#'   \item \code{rho}: optional numeric in \code{(-1, 1)}. When provided,
-#'         Step 1 is skipped regardless of \code{spatial_model} and the supplied
-#'         value is used directly.
-#'   \item \code{bias_correction} (logical): whether the post-treatment effect
-#'         is rescaled by \eqn{1/(1 - w's)}.
-#'   \item \code{nasc_penalty} (logical): whether the NASC penalty
-#'         \eqn{-\lambda \langle w, |s| \rangle} enters the likelihood.
-#' }
-#'
-#' Model dispatch (single source of truth):
-#' \itemize{
-#'   \item \code{nasc_penalty = TRUE}  -> stan_2_NASC.stan (penalty always on
-#'         in this file, bias_correction toggleable).
-#'   \item \code{nasc_penalty = FALSE} -> model1.stan (no penalty; bias
-#'         correction toggleable through the same generated-quantities mechanism).
-#' }
-#'
-#' Step 1 (SAR or SDM rho estimation) runs only when (i) the chosen Step 2
-#' configuration uses a non-trivial rho (penalty on, or bias correction on)
-#' AND (ii) no exogenous rho was supplied.
-#'
-#' @export
 nascSynth <- R6::R6Class(
   classname = "nascSynth",
   private = list(
@@ -65,56 +30,14 @@ nascSynth <- R6::R6Class(
     predictor_weights = NULL
   ),
   active = list(
-    #' @field plotData Tibble with observed and counterfactual outcomes
     plotData = function() { return(private$plot_data) },
-
-    #' @field interventionTime The first treatment period
     interventionTime = function() { return(private$intervention) }
   ),
   public = list(
 
-    #' @description
-    #' Create a new nascSynth object.
-    #'
-    #' @param data A data frame in long format containing the panel data.
-    #'   Must include columns for the unit identifier, time, outcome, and
-    #'   a binary treatment indicator (1 = treated, 0 = untreated).
-    #' @param time Unquoted column name for the time variable.
-    #' @param id Unquoted column name for the unit identifier.
-    #' @param treated Unquoted column name for the binary treatment indicator
-    #'   (1 in treated periods for the treated unit, 0 otherwise).
-    #' @param outcome Unquoted column name for the outcome variable.
-    #' @param ci_width Numeric in \code{(0, 1)}. Width of the credible interval.
-    #'   Default is \code{0.75}.
-    #' @param covariates Optional data frame in long format with columns for
-    #'   \code{id}, \code{time}, and one or more predictor variables. Required
-    #'   when \code{spatial_model} is \code{"SAR"} or \code{"SDM"}.
-    #' @param W Optional row-standardized spatial weights matrix. Row and column
-    #'   names should match the unit identifiers in \code{data}. Required when
-    #'   \code{bias_correction = TRUE} or \code{nasc_penalty = TRUE}.
-    #' @param spatial_model One of \code{"none"}, \code{"SAR"}, \code{"SDM"},
-    #'   or \code{"exogenous"}.
-    #' @param rho Optional scalar in \code{(-1, 1)}. When supplied, Step 1 is
-    #'   skipped and this value is used in Step 2 regardless of
-    #'   \code{spatial_model}. Required when \code{spatial_model = "exogenous"}.
-    #' @param bias_correction Logical. If \code{TRUE}, the post-treatment
-    #'   counterfactual is rescaled by \eqn{1/(1 - w's)}. Default is \code{TRUE}
-    #'   for SAR/SDM/exogenous and \code{FALSE} for
-    #'   \code{spatial_model = "none"}.
-    #' @param nasc_penalty Logical. If \code{TRUE}, the NASC penalty
-    #'   \eqn{-\lambda \langle w, |s| \rangle} enters the likelihood. Same
-    #'   model-aware default as \code{bias_correction}.
-    #' @param predictor_weights Optional non-negative numeric vector giving the
-    #'   importance weight for each covariate in the Step-2 SCM matching loss
-    #'   (the diagonal of Abadie-Diamond-Hainmueller's V matrix; same role as
-    #'   the \code{vs} argument in the bsynth package). Length must equal the
-    #'   number of covariate columns in \code{covariates}, in the same column
-    #'   order. \code{NULL} (default) gives equal weight (= 1) to every
-    #'   covariate. Setting an entry to 0 removes that covariate from the
-    #'   matching loss without dropping it from the data. Outcome rows always
-    #'   carry implicit weight 1; \code{predictor_weights} only re-scales the
-    #'   covariate-matching contribution. Has no effect when \code{covariates}
-    #'   is \code{NULL}.
+
+# Create a new nascSynth object.
+
     initialize = function(data, time, id, treated, outcome, ci_width = 0.75,
                           covariates = NULL,
                           W = NULL, spatial_model = "none",
@@ -188,11 +111,6 @@ nascSynth <- R6::R6Class(
       private$ci_width        <- ci_width
       private$covariates      <- covariates
 
-      # Validate predictor_weights against the supplied covariates. We only
-      # need to know the count of covariate columns; the same vector is used
-      # by both Step-2 paths (nasc_penalty = TRUE -> v_cov on appended
-      # matching rows in stan_2_NASC; nasc_penalty = FALSE -> v_aug on
-      # appended rows in model1.stan).
       if (!is.null(predictor_weights)) {
         if (is.null(covariates)) {
           stop("predictor_weights was supplied but covariates is NULL.")
@@ -239,20 +157,6 @@ nascSynth <- R6::R6Class(
         bias_correction, nasc_penalty, rho_src
       ))
 
-      # ----------------------------------------------------------------
-      # Robust binary check on the treated indicator.
-      #
-      # The previous setequal({0,1}, distinct(D)) check failed legitimate
-      # inputs in three common cases:
-      #   * NAs present: distinct returns {0, 1, NA}, setequal -> FALSE
-      #   * factor with levels "0"/"1": setequal compares strings, OK by
-      #     coincidence, but downstream `D == 1` may behave oddly
-      #   * logical TRUE/FALSE: coerces, but fragile
-      #
-      # We accept numeric, integer, logical, and a "0"/"1" factor; we
-      # require both 0 and 1 to actually appear (no degenerate columns);
-      # NAs are tolerated and treated as "N/A" downstream.
-      # ----------------------------------------------------------------
       trt_vec <- data |> dplyr::pull({{ treated }})
       if (is.logical(trt_vec)) {
         trt_num <- as.integer(trt_vec)
@@ -330,32 +234,14 @@ nascSynth <- R6::R6Class(
       )
     },
 
-    #' @description
-    #' Fit the Stan model via MCMC.
-    #' @param n_samples Number of rho draws to propagate to Step 2 when Step 1
-    #'   runs. Either a positive integer (default 100), or the string
-    #'   \code{"auto"}. When \code{"auto"}, the number is set to
-    #'   \code{min(round(n_eff_rho), n_samples_cap)} after Step 1 completes,
-    #'   floored at \code{n_samples_min}, so that the cut-posterior
-    #'   approximation does not oversample a low-information rho posterior.
-    #'   Ignored when an exogenous rho was supplied or when no rho is in use.
-    #' @param n_samples_cap Upper bound on the auto-selected \code{n_samples}.
-    #'   Default 200. Only used when \code{n_samples = "auto"}.
-    #' @param n_samples_min Lower bound on the auto-selected \code{n_samples}.
-    #'   Default 30. Only used when \code{n_samples = "auto"}.
-    #' @param cores Number of CPU cores for parallel execution.
-    #' @param ... Additional arguments forwarded to [rstan::sampling()].
-    #' @param worker_iter Iterations per worker chain in the multi-rho parallel
-    #'   loop. Default 2000. Increase if Stan reports low Bulk/Tail ESS.
-    #' @param worker_warmup Warmup per worker chain in the multi-rho parallel
-    #'   loop. Default 1000.
+# Fit the Stan model via MCMC
+
     fit = function(n_samples = 100,
                    n_samples_cap = 500L,
                    n_samples_min = 30L,
                    cores = parallel::detectCores() - 1,
                    worker_iter = 2000L, worker_warmup = 1000L, ...) {
 
-      # Validate n_samples up front: integer >= 1 or the literal string "auto".
       auto_n_samples <- FALSE
       if (is.character(n_samples) && length(n_samples) == 1L &&
           identical(n_samples, "auto")) {
@@ -380,9 +266,6 @@ nascSynth <- R6::R6Class(
       n_samples_cap <- as.integer(n_samples_cap)
       n_samples_min <- as.integer(n_samples_min)
 
-      # If auto was requested but Step 1 won't run, n_samples is unused
-      # downstream anyway. Keep the variable numerically well-typed for
-      # safety and let the user know we ignored the auto request.
       if (auto_n_samples && !isTRUE(private$uses_step1)) {
         message("'n_samples = \"auto\"' has no effect when Step 1 does not ",
                 "run (exogenous rho or no rho); ignoring.")
@@ -439,10 +322,6 @@ nascSynth <- R6::R6Class(
 
       donor_ids  <- colnames(X_pred)
       treated_id <- as.character(private$treated_ids)
-
-      # Store the canonical donor ordering so post-hoc helpers (summary,
-      # contamination plots, etc.) can align posterior draws with W and
-      # with donor names without re-deriving them and getting it wrong.
       private$donor_ids <- donor_ids
 
       W_J      <- NULL
@@ -472,14 +351,6 @@ nascSynth <- R6::R6Class(
           }
           lambda_W <- Re(ev)
 
-          # Covariates are optional. The unified within-SAR model accepts
-          # K_pred = 0 (rho identified from Y alone after the within
-          # transform). When covariates are supplied, time-invariant ones
-          # are *not* dropped: they are passed through to Stan, where the
-          # within transform zeros them out and the corresponding beta[k]
-          # posterior reverts to its prior. We emit an informational
-          # message naming any such covariates so users know their beta
-          # is not identified by the data.
           cov_names <- if (is.null(private$covariates)) {
             character(0)
           } else {
@@ -496,10 +367,6 @@ nascSynth <- R6::R6Class(
           treated_i  <- N_units                          # treated is last in unit_order
 
           if (length(cov_names) > 0L) {
-            # --------------------------------------------------------------
-            # Build a (K_pred x N x T0) covariate tensor over the pre-period.
-            # Unit ordering is (donors..., treated) to match Y_panel and W_full.
-            # --------------------------------------------------------------
             cov_pre <- private$covariates |>
               dplyr::filter(!!private$time < private$intervention)
 
@@ -532,16 +399,10 @@ nascSynth <- R6::R6Class(
               stop("Missing values in the covariate panel after reshape; please impute or drop.")
             }
 
-            # --------------------------------------------------------------
-            # Diagnose which covariates have no within-unit variation.
-            # We do NOT drop them; we just record the mask and inform.
-            # The within transform will zero them out inside Stan, and
-            # the corresponding beta[k] posterior will equal the prior.
-            # --------------------------------------------------------------
             within_var <- vapply(seq_along(cov_names), function(k) {
               m  <- X_kit[k, , , drop = TRUE]                # N x T0
               rm <- rowMeans(m)
-              mean(rowSums((m - rm)^2) / max(T0_n - 1L, 1L)) # avg within-unit variance
+              mean(rowSums((m - rm)^2) / max(T0_n - 1L, 1L))
             }, numeric(1))
             beta_identified <- within_var > 1e-10
             names(beta_identified) <- cov_names
@@ -560,12 +421,6 @@ nascSynth <- R6::R6Class(
           }
           K_pred <- length(cov_names)
 
-          # ----------------------------------------------------------------
-          # Reshape to Stan's expected layouts:
-          #   X1: array[T0] vector[K_pred]    -> R matrix [T0, K_pred]
-          #   X0: array[T0] matrix[K_pred, J] -> R array  [T0, K_pred, J]
-          # K_pred = 0 is supported via zero-sized arrays.
-          # ----------------------------------------------------------------
           if (K_pred == 0L) {
             X1_arr <- matrix(numeric(0), nrow = T0_n, ncol = 0)
             X0_arr <- array(numeric(0), dim = c(T0_n, 0, J_n))
@@ -620,17 +475,6 @@ nascSynth <- R6::R6Class(
           n_chains <- dim(rho_array)[2]
           total_rho_draws <- n_iters * n_chains
 
-          # ----------------------------------------------------------------
-          # Auto-sizing of n_samples from the Step-1 ESS of rho.
-          #
-          # The cut posterior is approximated by a Monte Carlo average over
-          # rho draws. There is no point integrating over more independent
-          # rho values than the Step-1 chain actually produced, so we cap
-          # the subsample size at round(n_eff_rho), then bound the result
-          # below by n_samples_min and above by n_samples_cap. We also cap
-          # at the total number of post-warmup draws so we never request
-          # more than exists.
-          # ----------------------------------------------------------------
           if (auto_n_samples) {
             n_eff_rho <- tryCatch({
               s <- rstan::summary(private$fitted, pars = "rho")$summary
@@ -681,12 +525,6 @@ nascSynth <- R6::R6Class(
 
       # STEP 2
       if (private$nasc_penalty) {
-        # ----------------------------------------------------------------
-        # Optional covariate-matching rows for stan_2_NASC.stan.
-        # Pre-treatment unit means of each covariate are passed as additional
-        # matching moments, mirroring the use_covariate_rows logic on the
-        # nasc_penalty = FALSE path. K_cov = 0 -> no augmented matching.
-        # ----------------------------------------------------------------
         if (!is.null(private$covariates)) {
           cov_names_step2 <- setdiff(
             names(private$covariates),
@@ -724,10 +562,6 @@ nascSynth <- R6::R6Class(
           X_cov1_vec  <- numeric(0)
         }
 
-        # Resolve V-matrix entries (predictor_weights) for the K_cov rows.
-        # Default: equal weight 1 for every covariate. When the user supplied
-        # predictor_weights, we align by name so the order in `covariates`
-        # need not match the canonical pivot order.
         if (K_cov_step2 > 0L) {
           if (!is.null(private$predictor_weights)) {
             if (!all(cov_names_step2 %in% names(private$predictor_weights))) {
@@ -749,10 +583,6 @@ nascSynth <- R6::R6Class(
           w_J1                = w_J1,
           T_post              = nrow(post_data),
           Y0_post             = as.matrix(X_pred[, donor_ids, drop = FALSE]),
-          # as.array() forces a length-1 numeric to serialize as a length-1
-          # vector rather than a scalar (rstan would otherwise pass dims=()
-          # and Stan would reject vector[1] declarations). No effect when
-          # length > 1.
           Y1_post             = as.array(as.numeric(post_data |> dplyr::pull(!!private$outcome))),
           use_bias_correction = as.integer(private$bias_correction),
           K_cov               = K_cov_step2,
@@ -800,10 +630,6 @@ nascSynth <- R6::R6Class(
           rho_bc  <- 0
         }
 
-        # V-matrix entries for the appended covariate rows in model1.stan.
-        # Outcome rows are 1..n_pre_real; covariate rows (if any) are
-        # n_pre_real+1..nrow(X), in the same row order as `cov_names` from
-        # the use_covariate_rows block above.
         N_total    <- nrow(X)
         N_outcome  <- n_pre_real
         N_aug      <- N_total - N_outcome
@@ -822,8 +648,6 @@ nascSynth <- R6::R6Class(
 
         base_data <- list(
           N                   = nrow(X),
-          # as.array() forces length-1 numerics to serialize as length-1
-          # vectors (Stan rejects scalars where vector[N] is declared).
           y                   = as.array(as.numeric(X1)),
           K                   = ncol(X),
           X                   = as.matrix(X),
@@ -902,8 +726,8 @@ nascSynth <- R6::R6Class(
       )
     },
 
-    #' @description
-    #' Update the credible interval width and recompute plot data.
+# Update the credible interval width
+
     updateWidth = function(ci_width = 0.75) {
       stopifnot(ci_width > 0, ci_width < 1)
       private$ci_width <- ci_width
@@ -929,16 +753,8 @@ nascSynth <- R6::R6Class(
       )
     },
 
-    #' @description
-    #' Posterior summary of the fit: ATT, per-period treatment effects,
-    #' donor weights, model parameters and MCMC diagnostics. Prints a
-    #' formatted summary and invisibly returns a \code{summary.nascSynth}
-    #' list. Also dispatched from \code{summary(obj)} via the S3 method
-    #' \code{summary.nascSynth}.
-    #' @param ci_width Optional override for the credible interval width.
-    #' @param print Logical; if \code{TRUE} (default), print the formatted
-    #'   summary to the console. Set to \code{FALSE} to retrieve the
-    #'   structured list silently for programmatic use.
+# summary of the fit
+
     summary = function(ci_width = NULL, print = TRUE) {
       if (is.null(private$y_synth_draws)) {
         stop("Run $fit() before calling summary().")
@@ -973,9 +789,6 @@ nascSynth <- R6::R6Class(
         uses_rho        = private$uses_rho,
         rho_source      = rho_source,
         fitted          = private$fitted,
-        # Pass `self` so .nasc_summary_stats can pull contamination /
-        # indirect-effect draws via .nasc_indirect_draws() (which expects
-        # a fitted nascSynth object).
         model           = self
       ))
 
@@ -985,29 +798,8 @@ nascSynth <- R6::R6Class(
       invisible(out)
     },
 
-    #' @description
-    #' Posterior draws and summaries of the indirect (spillover) treatment
-    #' effect. By Proposition 6.2, the per-donor spillover at post-period
-    #' \eqn{t} is \eqn{\delta_{i,t}^{NASC} = s_i \cdot \tau_{1t}^{NASC}},
-    #' where \eqn{s = \rho (I_J - \rho W_J)^{-1} w_{J1}}.
-    #'
-    #' Returns \code{NULL} when the model is configured without a network
-    #' (\code{uses_rho = FALSE}), since spillover is then identically zero
-    #' by construction.
-    #'
-    #' @return Either \code{NULL} (no rho) or a named list with components:
-    #'   \itemize{
-    #'     \item \code{donor_names} -- character vector of donor IDs.
-    #'     \item \code{time_post}  -- post-period time vector.
-    #'     \item \code{delta_arr}  -- \code{[n_draws x T_post x J]} array
-    #'           of per-draw, per-period, per-donor spillover.
-    #'     \item \code{delta_total} -- \code{[n_draws x T_post]} matrix of
-    #'           per-period total spillover (\eqn{\sum_i \delta_{i,t}}).
-    #'     \item \code{avg_per_donor} -- \code{[n_draws x J]} matrix of
-    #'           per-donor average spillover across post-periods.
-    #'     \item \code{avg_total} -- \code{[n_draws]} vector of average
-    #'           total spillover (the spillover analog of ATT).
-    #'   }
+# Draws and summaries of the indirect (spillover) treatment effect
+
     indirectEffect = function() {
       if (is.null(private$y_synth_draws)) {
         stop("Run $fit() before calling indirectEffect().")
@@ -1015,10 +807,8 @@ nascSynth <- R6::R6Class(
       .nasc_indirect_draws(self)
     },
 
-    #' @description
-    #' Base R plot of the observed and synthetic-control outcome trajectories,
-    #' with a shaded credible-interval band around the synthetic series and a
-    #' dotted vertical line at the intervention time.
+# Plot of the observed and synthetic-control outcome trajectories
+
     syntheticPlot = function() {
       if (is.null(private$plot_data)) {
         stop("Run $fit() before calling syntheticPlot().")
@@ -1061,24 +851,15 @@ nascSynth <- R6::R6Class(
       invisible(NULL)
     },
 
-    #' @description
-    #' Plot the estimated direct treatment effect (\eqn{\tau_{1t}}) over
-    #' time. The indirect effect overlay has been removed for simplicity.
-    #'
-    #' @param indirect Ignored. Kept in the signature so existing scripts
-    #'   calling `effectPlot(indirect = ...)` don't break, but no indirect
-    #'   line will be drawn.
-    effectPlot = function(indirect = NULL) {
+# Plot pf the estimated direct treatment effect
 
-      # Ensure fit has been run
+    effectPlot = function(indirect = NULL) {
       if (is.null(private$plot_data)) {
         stop("Run $fit() before calling effectPlot().")
       }
 
-      # Get the name of the time variable
       time_name <- rlang::as_name(private$time)
 
-      # Rely entirely on the pre-built .plot_tau helper for the direct effect
       .plot_tau(
         data       = private$plot_data,
         x          = time_name,
@@ -1091,41 +872,13 @@ nascSynth <- R6::R6Class(
       invisible(NULL)
     },
 
-    #' @description
-    #' Posterior density plots of the main scalar Bayesian parameters that the
-    #' model actually estimated. Depending on the configuration, this may
-    #' include:
-    #' \itemize{
-    #'   \item \code{rho}             -- Step-1 spatial autocorrelation (SAR/SDM).
-    #'   \item \code{theta[k]}        -- Step-1 SDM spillover coefficients
-    #'                                   (one panel per covariate). Labelled
-    #'                                   by covariate name when available.
-    #'   \item \code{beta[k]}         -- Step-1 SAR within-model covariate
-    #'                                   coefficients (one panel per covariate).
-    #'                                   Labelled by covariate name when
-    #'                                   available. Time-invariant covariates
-    #'                                   are not identified under the within
-    #'                                   transform and are skipped.
-    #'   \item \code{sigma_step1}     -- Step-1 residual SD (SAR or SDM).
-    #'   \item \code{lambda}          -- Step-2 NASC penalty strength
-    #'                                   (when \code{nasc_penalty = TRUE}).
-    #'   \item \code{sigma_step2}     -- Step-2 residual SD on the standardized
-    #'                                   outcome scale.
-    #'   \item \code{bias_correction} -- Posterior of the multiplicative bias
-    #'                                   factor \eqn{1/(1 - \langle w, s\rangle)}
-    #'                                   (when \code{bias_correction = TRUE}).
-    #'                                   Skipped when bias correction is off,
-    #'                                   since draws are constant at 1.
-    #' }
-    #' Each parameter is shown in its own panel as a color-filled density curve.
+# Posterior density plots of the main parameters
+
     posteriorPlot = function() {
       if (is.null(private$fitted) && is.null(private$y_synth_draws)) {
         stop("Run $fit() before calling posteriorPlot().")
       }
 
-      # ----------------------------------------------------------------
-      # Collect (label, draws) pairs from wherever each parameter lives.
-      # ----------------------------------------------------------------
       panels <- list()
 
       add_panel <- function(label, draws) {
@@ -1136,9 +889,6 @@ nascSynth <- R6::R6Class(
         panels[[length(panels) + 1L]] <<- list(label = label, draws = x)
       }
 
-      # Step-1 scalars (rho, sigma_step1) and theta vector live in private$fitted
-      # whenever Step 1 ran. private$fitted may also be a Step-2 fit when Step 1
-      # was skipped, so we extract defensively rather than by branch.
       step1_draws <- if (!is.null(private$fitted)) {
         tryCatch(
           rstan::extract(private$fitted, permuted = TRUE),
@@ -1152,8 +902,6 @@ nascSynth <- R6::R6Class(
         add_panel("rho", step1_draws$rho)
       }
 
-      # theta is a matrix (n_draws x K_pred) in the SDM model. Plot one density
-      # per component so the visualization is meaningful.
       if (!is.null(step1_draws$theta)) {
         th <- step1_draws$theta
         th_labels <- if (!is.null(private$cov_names) &&
@@ -1177,13 +925,8 @@ nascSynth <- R6::R6Class(
         }
       }
 
-      # beta is a vector (n_draws x K_pred) in the SAR within-transformed model.
-      # Time-invariant covariates have unidentified beta (posterior == prior);
-      # private$beta_identified flags which columns to actually plot. We also
-      # skip any column that is entirely NA / non-finite to be safe.
       if (!is.null(step1_draws$beta)) {
         bt <- step1_draws$beta
-        # Resolve labels and identification mask
         K_b <- if (is.matrix(bt)) ncol(bt) else 1L
         b_labels <- if (!is.null(private$cov_names) &&
                         length(private$cov_names) == K_b) {
@@ -1214,19 +957,14 @@ nascSynth <- R6::R6Class(
         }
       }
 
-      # Step-1 sigma is named differently per model: sigma_sar vs sigma_sdm.
-      # Surface either under a unified label.
+      # Step-1 sigma is named differently per model: sigma_sar vs sigma_sdm
       if (!is.null(step1_draws$sigma_sar)) {
         add_panel("sigma_step1", step1_draws$sigma_sar)
       } else if (!is.null(step1_draws$sigma_sdm)) {
         add_panel("sigma_step1", step1_draws$sigma_sdm)
       }
 
-      # Step-2 scalars (lambda, sigma_step2, bias_correction) live in
-      # private$y_synth_draws. lambda is only present when nasc_penalty = TRUE
-      # (stan_2_NASC). bias_correction is a generated quantity equal to
-      # 1 / (1 - <w, s>) when bias correction is on, and the constant 1.0 when
-      # it is off; the constant case is auto-skipped by add_panel's sd > 0 guard.
+      # Step-2 scalars (lambda, sigma_step2, bias_correction)
       if (!is.null(private$y_synth_draws)) {
         if (!is.null(private$y_synth_draws$lambda)) {
           add_panel("lambda", private$y_synth_draws$lambda)
@@ -1246,10 +984,6 @@ nascSynth <- R6::R6Class(
         stop("No estimated scalar parameters available to plot.")
       }
 
-      # ----------------------------------------------------------------
-      # Layout: stack vertically; for many panels, switch to a 2-column
-      # grid so densities stay readable.
-      # ----------------------------------------------------------------
       n <- length(panels)
       ncol_grid <- if (n <= 4L) 1L else 2L
       nrow_grid <- ceiling(n / ncol_grid)
@@ -1272,22 +1006,11 @@ nascSynth <- R6::R6Class(
       invisible(NULL)
     },
 
-    #' @description
-    #' Posterior density plot of the average treatment effect on the treated
-    #' (ATT), pooled across all post-treatment periods. When the model uses
-    #' a network, a second panel is added showing the density of the
-    #' average indirect (spillover) effect, defined as the per-draw
-    #' average across BOTH donors and post-periods of
-    #' \eqn{\delta_{i,t}^{NASC}} (the spillover analog of ATT,
-    #' Proposition 6.2). This matches the "Average indirect Treatment
-    #' Effect" reported in \code{summary()}.
-    #'
-    #' @param indirect Logical. If \code{TRUE} (default when the model uses
-    #'   a network), append a second panel for the average indirect effect.
+# Posterior density plot of the average treatment effect
+
     attPlot = function(indirect = NULL) {
       if (is.null(private$y_synth_draws)) stop("Run $fit() before calling attPlot.")
 
-      # Reconstruct tau draws
       ycf <- private$y_synth_draws$y_counterfactual
       bc  <- private$y_synth_draws$bias_correction
       if (is.null(bc)) bc <- rep(1, ncol(ycf))
@@ -1317,11 +1040,7 @@ nascSynth <- R6::R6Class(
       if (indirect) {
         ind <- tryCatch(.nasc_indirect_draws(self), error = function(e) NULL)
         if (!is.null(ind)) {
-          # avg_total[d] is the per-draw mean across post-periods of the
-          # donor-SUM spillover. Dividing by J turns it into the
-          # donor-AVERAGE across both axes (donors and periods), which
-          # is the spillover analog of ATT and matches the scalar
-          # reported by summary()$indirect_avg.
+
           J <- length(ind$donor_names)
           avg_indirect_draws <- ind$avg_total / J
         } else {
@@ -1361,27 +1080,11 @@ nascSynth <- R6::R6Class(
       invisible(NULL)
     },
 
-    #' @description
-    #' Posterior density plots of the period-by-period treatment effects
-    #' for all post-treatment periods. When the model uses a network (i.e.
-    #' \code{uses_rho = TRUE}), two columns are drawn side by side: the
-    #' left column is the direct effect \eqn{\tau_{1t}} and the right
-    #' column is the donor-AVERAGE indirect effect
-    #' \eqn{\bar\delta_t = (1/J)\sum_i \delta_{i,t}^{NASC}}, with one row
-    #' per post-period. When no network is in use, only the direct-effect
-    #' column is drawn (single-column layout, preserving previous
-    #' behavior). Panels within a column share a common x-axis; the two
-    #' columns use independent x-axes since direct and indirect effects
-    #' are typically on very different scales.
-    #'
-    #' @param indirect Logical. If \code{TRUE} (default when the model
-    #'   uses a network), also draw the per-period donor-average indirect
-    #'   effect density column. Set to \code{FALSE} to suppress the
-    #'   indirect panels even when a network is in use.
+# Posterior density plots of the period-by-period treatment effects
+
     tauPlot = function(indirect = NULL) {
       if (is.null(private$y_synth_draws)) stop("Run $fit() before calling tauPlot.")
 
-      # Reconstruct tau draws (same logic as before).
       ycf <- private$y_synth_draws$y_counterfactual
       bc  <- private$y_synth_draws$bias_correction
       if (is.null(bc)) bc <- rep(1, ncol(ycf))
@@ -1405,13 +1108,6 @@ nascSynth <- R6::R6Class(
 
       n_t <- ncol(tau_draws)
 
-      # ----------------------------------------------------------------
-      # Decide whether to draw the indirect-effect column.
-      #
-      # Default: ON when the model uses a network and we can compute
-      # spillover draws. Off otherwise. The user can force-disable it
-      # via indirect = FALSE.
-      # ----------------------------------------------------------------
       indirect_default <- isTRUE(private$uses_rho)
       if (is.null(indirect)) indirect <- indirect_default
       stopifnot(is.logical(indirect), length(indirect) == 1L)
@@ -1419,16 +1115,10 @@ nascSynth <- R6::R6Class(
       delta_avg_draws <- NULL
       if (indirect) {
         ind <- tryCatch(.nasc_indirect_draws(self), error = function(e) NULL)
-        if (!is.null(ind)) {
-          # Donor-AVERAGE per-period spillover (matches summary).
-          # delta_total[d, t] is the SUM across donors at period t;
-          # dividing by J gives the donor-average.
+        if (!is.null(ind)) {.
           J <- length(ind$donor_names)
           delta_avg_draws <- ind$delta_total / J         # [n_draws x T_post]
         } else if (indirect_default) {
-          # Only warn when the user (or the default) actually expected
-          # indirect draws. If the model has no rho, falling back to the
-          # single-column layout silently is the desired behavior.
           warning("Indirect-effect draws unavailable; drawing direct effect only.")
         }
         if (is.null(delta_avg_draws)) indirect <- FALSE
@@ -1458,9 +1148,6 @@ nascSynth <- R6::R6Class(
                     oma = c(3, 0, 2.4, 0),
                     bty = "l")
 
-      # When mfrow = c(n_t, 2), R fills row-by-row, so for each period i
-      # we draw the direct panel first, then the indirect panel. Column
-      # titles are placed via mtext() in the outer top margin.
       for (i in seq_len(n_t)) {
         is_last <- i == n_t
 
@@ -1492,7 +1179,6 @@ nascSynth <- R6::R6Class(
         }
       }
 
-      # Column headings in the outer top margin
       if (indirect) {
         graphics::mtext(expression(bold(tau) ~ "(direct)"), side = 3, outer = TRUE,
                         at = 0.25, line = 0.6, font = 2)
@@ -1506,25 +1192,8 @@ nascSynth <- R6::R6Class(
       invisible(NULL)
     },
 
-    #' @description
-    #' Ridgeline plot of the posterior weight density per donor. Densities
-    #' are stacked vertically, each labelled by donor name, and adjacent
-    #' ridges overlap by a configurable fraction so that each individual
-    #' density can be drawn taller without compressing the layout.
-    #'
-    #' @param overlap Numeric in \code{[0, 1)}. Fraction of vertical
-    #'   overlap between adjacent ridges. \code{0} reproduces the old
-    #'   non-overlapping layout; \code{0.5} (default) makes each ridge
-    #'   reach halfway into the row above; values close to \code{1}
-    #'   approach a fully-stacked look. Default \code{0.5}.
-    #' @param scale Numeric > 0. Multiplicative height of every ridge
-    #'   relative to the baseline step. Combined with \code{overlap} this
-    #'   controls how prominent each density is. Default \code{1.4}.
-    #' @param fill_alpha Numeric in \code{(0, 1]}. Multiplier on the
-    #'   default fill transparency (\eqn{\approx 0.4} alpha at
-    #'   \code{fill_alpha = 1}). Lower values make overlapping ridges
-    #'   more transparent. Default \code{0.85}, matching the look of
-    #'   \code{posteriorPlot()}.
+# Plot of the posterior weight density per donor
+
     weightDraws = function(overlap = 0.5, scale = 1.4, fill_alpha = 0.85) {
       if (is.null(private$fitted)) stop("Run $fit() before calling weightDraws().")
 
@@ -1538,9 +1207,6 @@ nascSynth <- R6::R6Class(
 
       w_mat <- private$y_synth_draws$w
 
-      # Use the canonical donor ordering stored at fit time. Falling back
-      # to setdiff(levels(id), treated_id) silently scrambles labels when
-      # the long data isn't sorted by id.
       treated_id <- as.character(private$treated_ids)
       donor_names <- private$donor_ids
       if (is.null(donor_names)) {
@@ -1555,40 +1221,17 @@ nascSynth <- R6::R6Class(
 
       n <- ncol(w_mat)
 
-      # Per-donor density. We compute on a common x-grid so the shapes
-      # are directly comparable; densities are NOT renormalized per ridge,
-      # so a peaked donor is visibly taller than a flat one.
       dens <- lapply(seq_len(n), function(i) {
         stats::density(w_mat[, i], na.rm = TRUE)
       })
 
       x_range <- range(unlist(lapply(dens, function(d) d$x)))
       max_y   <- max(vapply(dens, function(d) max(d$y), numeric(1)))
-      if (!is.finite(max_y) || max_y <= 0) max_y <- 1  # degenerate safety
+      if (!is.finite(max_y) || max_y <= 0) max_y <- 1
 
-      # ---------------------------------------------------------------
-      # Layout geometry.
-      #
-      # `step` is the vertical distance between adjacent donor baselines.
-      # `ridge_h` is the maximum drawn height of any single density.
-      #
-      # The relationship overlap = 1 - step/ridge_h means:
-      #   overlap = 0   -> step = ridge_h     (no overlap; old behaviour)
-      #   overlap = 0.5 -> step = 0.5*ridge_h (half-overlap; ridges
-      #                                        reach halfway into row above)
-      #   overlap -> 1  -> step -> 0          (fully stacked; not useful)
-      #
-      # `scale` then expands ridge_h relative to the implied baseline,
-      # letting the user make ridges taller without changing the spacing
-      # logic. We anchor on max_y so the tallest density gets exactly
-      # `scale * max_y` of vertical room.
-      # ---------------------------------------------------------------
       ridge_h <- scale * max_y
       step    <- ridge_h * (1 - overlap)
-      # Top of the topmost ridge sits at step*n + ridge_h; pad a little.
       ylim_top <- step * n + ridge_h * 1.05
-      # Bottom: a small negative cushion so the lowest baseline isn't
-      # flush with the x-axis frame.
       ylim_bot <- -ridge_h * 0.05
 
       op <- graphics::par(no.readonly = TRUE)
@@ -1604,15 +1247,9 @@ nascSynth <- R6::R6Class(
       cols   <- rep(grDevices::adjustcolor("steelblue", alpha.f = fill_alpha * 0.4), n)
       border <- "steelblue"
 
-      # Draw from TOP donor down to BOTTOM donor. In a stacked plot the
-      # last polygon drawn sits in front of earlier ones, so to get the
-      # canonical ridgeline look (lower rows appearing in front), the
-      # bottom ridge must be drawn last. seq(n, 1) does exactly that.
       for (i in seq(n, 1L, by = -1L)) {
         d <- dens[[i]]
         baseline <- step * i
-        # Each density is scaled to ridge_h at its own peak * (this peak /
-        # global max), preserving relative heights across donors.
         y <- baseline + d$y * (ridge_h / max_y)
         graphics::polygon(
           x = c(d$x, rev(d$x)),
@@ -1620,7 +1257,6 @@ nascSynth <- R6::R6Class(
           col    = cols[i],
           border = border
         )
-        # Thin baseline rule for visual anchoring.
         graphics::segments(x_range[1], baseline, x_range[2], baseline,
                            col = "gray60", lwd = 0.5)
       }
@@ -1628,14 +1264,13 @@ nascSynth <- R6::R6Class(
       invisible(NULL)
     },
 
-    #' @description
-    #' Plot correlations between weights across draws.
+# Plot of the correlations between weights across draws
+
     weightCorr = function() {
       if (is.null(private$fitted)) stop("Run $fit() before calling weightCorr().")
 
       w_mat <- private$y_synth_draws$w
 
-      # Use canonical donor ordering (see weightDraws() for rationale).
       treated_id <- as.character(private$treated_ids)
       donor_names <- private$donor_ids
       if (is.null(donor_names)) {
@@ -1654,9 +1289,7 @@ nascSynth <- R6::R6Class(
       on.exit(graphics::par(op))
       graphics::par(mar = c(6, 6, 2, 5))
 
-      # Diverging palette red -> white -> green, midpoint 0
       pal <- grDevices::colorRampPalette(c("red", "white", "green"))(101)
-      # Plot rows top-to-bottom to mirror typical heatmap orientation
       mat_plot <- t(cormat)[, n:1, drop = FALSE]
 
       graphics::image(
@@ -1669,7 +1302,6 @@ nascSynth <- R6::R6Class(
       graphics::axis(2, at = seq_len(n), labels = rev(donor_names), las = 1)
       graphics::box()
 
-      # Simple color legend on the right
       lg <- seq(-1, 1, length.out = length(pal))
       usr <- graphics::par("usr")
       xl <- usr[2] + (usr[2] - usr[1]) * 0.02

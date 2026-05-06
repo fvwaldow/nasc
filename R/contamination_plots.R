@@ -1,41 +1,5 @@
-# nasc_contamination_plots.R
-#
-#' Network graph coloured by donor contamination
-#'
-#' @description
-#' Plots the spatial-weights network underlying a fitted \code{nascSynth}
-#' object as a graph, with each donor node coloured by its posterior mean
-#' contamination \eqn{|s_j|}. The treated unit is drawn as a distinct
-#' marker and is not coloured on the contamination scale (its row of
-#' \eqn{W} feeds donors but it has no weight of its own).
-#'
-#' Edges follow the row-standardised weights matrix \eqn{W}. By default the
-#' graph is treated as undirected and edges weaker than \code{edge_threshold}
-#' are dropped to keep the plot readable.
-#'
-#' @param model A fitted \code{nascSynth} object.
-#' @param signed Logical. If \code{TRUE}, nodes are coloured by signed
-#'   \eqn{s_j} on a diverging palette; if \code{FALSE} (default), by
-#'   \eqn{|s_j|} on a sequential palette.
-#' @param edge_threshold Numeric. Edges with absolute weight below this
-#'   value are not drawn. Default \code{1e-3}.
-#' @param layout An \code{igraph} layout function or a two-column matrix
-#'   of node coordinates. Default \code{igraph::layout_with_fr}.
-#' @param vertex_size Numeric scalar for node size. Default \code{12}.
-#' @param label_cex Numeric scalar for label size. Default \code{0.8}.
-#' @param directed Logical. If \code{TRUE}, treats \eqn{W} as a directed
-#'   graph and draws arrows. Default \code{FALSE}.
-#' @param seed Integer or \code{NULL}. Seed used to make stochastic
-#'   layouts (e.g. \code{layout_with_fr}) reproducible across calls.
-#'   The seed is applied locally and the user's RNG state is restored
-#'   on exit. Set to \code{NULL} for the original stochastic behaviour.
-#'   Ignored when \code{layout} is a precomputed coordinate matrix.
-#'   Default \code{1L}.
-#'
-#' @return Invisibly returns a tibble with one row per donor giving the
-#'   posterior mean of \eqn{s_j} and \eqn{|s_j|}.
-#'
-#' @export
+# Network graph coloured by donor contamination
+
 contaminationGraph <- function(model,
                                signed         = FALSE,
                                edge_threshold = 1e-3,
@@ -281,72 +245,8 @@ contaminationGraph <- function(model,
 }
 
 
-#' Network graph coloured by direct and indirect treatment effects
-#'
-#' @description
-#' Plots the spatial-weights network underlying a fitted \code{nascSynth}
-#' object as a graph, with each donor node coloured by its posterior
-#' mean indirect (spillover) effect \eqn{\bar\delta_j} averaged over
-#' the post-treatment periods, and the treated node coloured by the
-#' posterior-mean ATT (the direct effect averaged over post-treatment
-#' periods). By Proposition 6.2,
-#' \eqn{\delta_{j,t}^{NASC} = s_j \cdot \tau_{1t}^{NASC}}, so this plot
-#' is the effect-side analog of \code{contaminationPlot()}: where
-#' \code{contaminationPlot} shows how \emph{exposed} each donor is to
-#' the treated unit through the network, this plot shows the
-#' \emph{realized} treatment effect at every node -- direct at the
-#' treated unit, indirect at every donor.
-#'
-#' Direct and indirect effects share a single colour scale so the
-#' relative magnitudes are directly comparable on the figure. Because
-#' the ATT is typically larger than any single donor's spillover, the
-#' treated node usually appears strongly coloured while donors near
-#' the periphery of the network appear pale -- the contrast itself
-#' communicates the share of the total effect that is direct vs
-#' indirect. The treated unit is also drawn as a slightly larger
-#' square so it remains visually identifiable.
-#'
-#' Edges follow the row-standardised weights matrix \eqn{W}. By default
-#' the graph is treated as undirected and edges weaker than
-#' \code{edge_threshold} are dropped to keep the plot readable.
-#'
-#' @param model A fitted \code{nascSynth} object. The model must use a
-#'   network (\code{uses_rho = TRUE}); otherwise spillover is identically
-#'   zero by construction and only the treated unit would carry a
-#'   non-trivial colour.
-#' @param signed Logical. If \code{TRUE} (default), nodes are coloured
-#'   by signed effects on a diverging blue-white-red palette centered at
-#'   zero -- the natural choice for treatment effects, where the sign
-#'   distinguishes positive from negative effects. If \code{FALSE}, by
-#'   absolute effects on a sequential palette.
-#' @param edge_threshold Numeric. Edges with absolute weight below this
-#'   value are not drawn. Default \code{1e-3}.
-#' @param layout An \code{igraph} layout function or a two-column matrix
-#'   of node coordinates. Default \code{igraph::layout_with_fr}.
-#' @param vertex_size Numeric scalar for node size. The treated unit is
-#'   drawn 1.2x this size for visual identification. Default \code{12}.
-#' @param label_cex Numeric scalar for label size. Default \code{0.8}.
-#' @param directed Logical. If \code{TRUE}, treats \eqn{W} as a directed
-#'   graph and draws arrows. Default \code{FALSE}.
-#' @param show_values Logical. If \code{TRUE}, append the numeric
-#'   effect to each node label (\eqn{\bar\delta_j} for donors, ATT for
-#'   the treated unit). Useful for small networks; can clutter larger
-#'   ones. Default \code{FALSE}.
-#' @param digits Integer. Number of significant digits used when
-#'   \code{show_values = TRUE}. Default \code{2}.
-#' @param seed Integer or \code{NULL}. Seed used to make stochastic
-#'   layouts (e.g. \code{layout_with_fr}) reproducible across calls.
-#'   The seed is applied locally and the user's RNG state is restored
-#'   on exit. Set to \code{NULL} for the original stochastic behaviour.
-#'   Ignored when \code{layout} is a precomputed coordinate matrix.
-#'   Default \code{1L}.
-#'
-#' @return Invisibly returns a tibble with one row per node giving the
-#'   posterior mean effect (\code{effect_mean} -- \eqn{\bar\delta_j}
-#'   for donors, ATT for the treated unit), its absolute value
-#'   (\code{abs_effect_mean}), and a logical flag \code{is_treated}.
-#'
-#' @export
+# Network graph coloured by direct and indirect treatment effects
+
 effectGraph <- function(model,
                         signed         = TRUE,
                         edge_threshold = 1e-3,
@@ -399,7 +299,7 @@ effectGraph <- function(model,
   # pull from the indirect-effect helper.
   ind <- .nasc_indirect_draws(model)
   if (is.null(ind)) {
-    delta_mean     <- setNames(numeric(length(donor_names)), donor_names)
+    delta_mean     <- stats::setNames(numeric(length(donor_names)), donor_names)
     delta_abs_mean <- delta_mean
     warning("Model has no rho in use; donor spillovers are identically ",
             "zero. Only the treated unit's ATT carries a non-trivial colour.")
@@ -672,38 +572,12 @@ effectGraph <- function(model,
 }
 
 
-#' Mean contamination vs mean weight scatter plot
-#'
-#' @description
-#' Per-donor scatter plot of posterior-mean synthetic-control weight
-#' (\eqn{\bar w_j}) against posterior-mean contamination
-#' (\eqn{\bar s_j} or \eqn{\overline{|s_j|}}). Donors that combine large
-#' weight with large contamination contribute the most to the NASC penalty
-#' \eqn{\langle w, |s|\rangle} and to the bias-correction term \eqn{w's}
-#' and are the diagnostic targets of this plot.
-#'
-#' @param model A fitted \code{nascSynth} object.
-#' @param signed Logical. If \code{TRUE}, plot signed \eqn{\bar s_j} on the
-#'   x-axis with a vertical reference line at zero; if \code{FALSE}
-#'   (default), plot \eqn{\overline{|s_j|}}.
-#' @param label Logical. If \code{TRUE} (default), every marker is labelled
-#'   with its donor name. The top \code{top_n} contributors are emphasized
-#'   in bold. Set to \code{FALSE} to suppress all labels (useful for very
-#'   dense donor pools where labels would be unreadable).
-#' @param top_n Integer. When \code{label = TRUE}, the \code{top_n} donors
-#'   with largest \eqn{\bar w_j \cdot |\bar s_j|} (their contribution to
-#'   the penalty) are drawn in bold; remaining donors are still labelled,
-#'   in normal weight. Default \code{10}.
-#'
-#' @return Invisibly returns a tibble with columns \code{donor},
-#'   \code{w_mean}, \code{s_mean}, \code{abs_s_mean}, sorted by descending
-#'   contribution \eqn{\bar w_j |\bar s_j|}.
-#'
-#' @export
+# Mean contamination vs mean weight scatter plot
+
 contaminationScatter <- function(model,
                                  signed = FALSE,
                                  label  = TRUE,
-                                 top_n  = 10L) { # Kept to maintain backward compatibility with existing calls
+                                 top_n  = 10L) {
 
   bits        <- .nasc_contamination_draws(model)
   donor_names <- bits$donor_names
