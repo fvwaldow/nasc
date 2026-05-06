@@ -36,7 +36,7 @@ nascSynth <- R6::R6Class(
   public = list(
 
 
-# Create a new nascSynth object.
+    # Create a new nascSynth object.
 
     initialize = function(data, time, id, treated, outcome, ci_width = 0.75,
                           covariates = NULL,
@@ -234,7 +234,7 @@ nascSynth <- R6::R6Class(
       )
     },
 
-# Fit the Stan model via MCMC
+    # Fit the Stan model via MCMC
 
     fit = function(n_samples = 100,
                    n_samples_cap = 500L,
@@ -726,7 +726,7 @@ nascSynth <- R6::R6Class(
       )
     },
 
-# Update the credible interval width
+    # Update the credible interval width
 
     updateWidth = function(ci_width = 0.75) {
       stopifnot(ci_width > 0, ci_width < 1)
@@ -753,7 +753,7 @@ nascSynth <- R6::R6Class(
       )
     },
 
-# summary of the fit
+    # summary of the fit
 
     summary = function(ci_width = NULL, print = TRUE) {
       if (is.null(private$y_synth_draws)) {
@@ -798,7 +798,7 @@ nascSynth <- R6::R6Class(
       invisible(out)
     },
 
-# Draws and summaries of the indirect (spillover) treatment effect
+    # Draws and summaries of the indirect (spillover) treatment effect
 
     indirectEffect = function() {
       if (is.null(private$y_synth_draws)) {
@@ -807,7 +807,7 @@ nascSynth <- R6::R6Class(
       .nasc_indirect_draws(self)
     },
 
-# Plot of the observed and synthetic-control outcome trajectories
+    # Plot of the observed and synthetic-control outcome trajectories
 
     syntheticPlot = function() {
       if (is.null(private$plot_data)) {
@@ -851,7 +851,7 @@ nascSynth <- R6::R6Class(
       invisible(NULL)
     },
 
-# Plot pf the estimated direct treatment effect
+    # Plot pf the estimated direct treatment effect
 
     effectPlot = function(indirect = NULL) {
       if (is.null(private$plot_data)) {
@@ -872,7 +872,7 @@ nascSynth <- R6::R6Class(
       invisible(NULL)
     },
 
-# Posterior density plots of the main parameters
+    # Posterior density plots of the main parameters
 
     posteriorPlot = function() {
       if (is.null(private$fitted) && is.null(private$y_synth_draws)) {
@@ -1006,7 +1006,7 @@ nascSynth <- R6::R6Class(
       invisible(NULL)
     },
 
-# Posterior density plot of the average treatment effect
+    # Posterior density plot of the average treatment effect
 
     attPlot = function(indirect = NULL) {
       if (is.null(private$y_synth_draws)) stop("Run $fit() before calling attPlot.")
@@ -1080,7 +1080,7 @@ nascSynth <- R6::R6Class(
       invisible(NULL)
     },
 
-# Posterior density plots of the period-by-period treatment effects
+    # Posterior density plots of the period-by-period treatment effects
 
     tauPlot = function(indirect = NULL) {
       if (is.null(private$y_synth_draws)) stop("Run $fit() before calling tauPlot.")
@@ -1115,7 +1115,7 @@ nascSynth <- R6::R6Class(
       delta_avg_draws <- NULL
       if (indirect) {
         ind <- tryCatch(.nasc_indirect_draws(self), error = function(e) NULL)
-        if (!is.null(ind)) {.
+        if (!is.null(ind)) {
           J <- length(ind$donor_names)
           delta_avg_draws <- ind$delta_total / J         # [n_draws x T_post]
         } else if (indirect_default) {
@@ -1192,7 +1192,7 @@ nascSynth <- R6::R6Class(
       invisible(NULL)
     },
 
-# Plot of the posterior weight density per donor
+    # Plot of the posterior weight density per donor
 
     weightDraws = function(overlap = 0.5, scale = 1.4, fill_alpha = 0.85) {
       if (is.null(private$fitted)) stop("Run $fit() before calling weightDraws().")
@@ -1264,7 +1264,7 @@ nascSynth <- R6::R6Class(
       invisible(NULL)
     },
 
-# Plot of the correlations between weights across draws
+    # Plot of the correlations between weights across draws
 
     weightCorr = function() {
       if (is.null(private$fitted)) stop("Run $fit() before calling weightCorr().")
