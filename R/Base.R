@@ -27,7 +27,11 @@ nascSynth <- R6::R6Class(
     uses_step1 = NULL,
     beta_identified = NULL,
     cov_names = NULL,
-    predictor_weights = NULL
+    predictor_weights = NULL,
+    predictors_op = NULL,
+    special_predictors = NULL,
+    time_predictors_prior = NULL,
+    predictor_labels = NULL
   ),
   active = list(
     plotData = function() { return(private$plot_data) },
@@ -44,7 +48,10 @@ nascSynth <- R6::R6Class(
                           rho = NULL,
                           bias_correction = NULL,
                           nasc_penalty = NULL,
-                          predictor_weights = NULL) {
+                          predictor_weights = NULL,
+                          predictors.op = "mean",
+                          special.predictors = NULL,
+                          time.predictors.prior = NULL) {
 
       stopifnot(ci_width > 0 & ci_width < 1)
 
@@ -111,26 +118,59 @@ nascSynth <- R6::R6Class(
       private$ci_width        <- ci_width
       private$covariates      <- covariates
 
+      # ---- predictors.op / special.predictors / time.predictors.prior ----
+      if (!is.character(predictors.op) || length(predictors.op) != 1L ||
+          is.na(predictors.op) || !nzchar(predictors.op)) {
+        stop("'predictors.op' must be a single non-empty character string ",
+             "(e.g. \"mean\", \"median\").")
+      }
+      tryCatch(match.fun(predictors.op),
+               error = function(e) {
+                 stop("predictors.op = '", predictors.op,
+                      "' is not a callable function.")
+               })
+
+      if (!is.null(special.predictors)) {
+        if (!is.list(special.predictors)) {
+          stop("'special.predictors' must be a list of length-3 lists.")
+        }
+        for (i in seq_along(special.predictors)) {
+          e_i <- special.predictors[[i]]
+          if (!is.list(e_i) || length(e_i) != 3L) {
+            stop(sprintf(
+              "special.predictors[[%d]] must be a list of length 3: ",
+              i),
+              "list(<predictor>, <time periods>, <operator>).")
+          }
+        }
+      }
+
+      if (!is.null(time.predictors.prior)) {
+        if (!is.numeric(time.predictors.prior) ||
+            length(time.predictors.prior) < 1L ||
+            anyNA(time.predictors.prior)) {
+          stop("'time.predictors.prior' must be a non-empty numeric vector ",
+               "without NAs.")
+        }
+      }
+
+      private$predictors_op         <- predictors.op
+      private$special_predictors    <- special.predictors
+      private$time_predictors_prior <- time.predictors.prior
+
+      # predictor_weights: only shape-agnostic checks here. The
+      # length/name match against the final predictor row labels happens in
+      # $fit() once .build_predictor_matrix() has run.
       if (!is.null(predictor_weights)) {
-        if (is.null(covariates)) {
-          stop("predictor_weights was supplied but covariates is NULL.")
+        if (is.null(covariates) && is.null(special.predictors)) {
+          stop("predictor_weights was supplied but neither 'covariates' nor ",
+               "'special.predictors' is set.")
         }
-        cov_cols_for_check <- setdiff(
-          names(covariates),
-          c(rlang::as_name(rlang::enquo(time)),
-            rlang::as_name(rlang::enquo(id)))
-        )
-        if (length(predictor_weights) != length(cov_cols_for_check)) {
-          stop(sprintf(
-            "predictor_weights has length %d but covariates has %d predictor column(s).",
-            length(predictor_weights), length(cov_cols_for_check)
-          ))
-        }
-        if (!is.numeric(predictor_weights) || any(!is.finite(predictor_weights)) ||
+        if (!is.numeric(predictor_weights) ||
+            any(!is.finite(predictor_weights)) ||
             any(predictor_weights < 0)) {
           stop("predictor_weights must be a finite, non-negative numeric vector.")
         }
-        names(predictor_weights) <- cov_cols_for_check
       }
       private$predictor_weights <- predictor_weights
 
@@ -288,41 +328,51 @@ nascSynth <- R6::R6Class(
       X_pred <- post_data |> dplyr::select(-!!private$time, -!!private$treated, -!!private$outcome)
 
       n_pre_real <- nrow(pre_data)
-      use_covariate_rows <- !private$nasc_penalty && !is.null(private$covariates)
 
-      if (use_covariate_rows) {
-        cov_names <- setdiff(
-          names(private$covariates),
-          c(rlang::as_name(private$time), rlang::as_name(private$id))
-        )
-        cov_wide <- private$covariates |>
-          dplyr::filter(!!private$time < private$intervention) |>
-          dplyr::group_by(!!private$id) |>
-          dplyr::summarise(
-            dplyr::across(dplyr::all_of(cov_names), mean),
-            .groups = "drop"
-          ) |>
-          tidyr::pivot_longer(
-            cols      = dplyr::all_of(cov_names),
-            names_to  = ".covariate",
-            values_to = ".value"
-          ) |>
-          tidyr::pivot_wider(
-            names_from  = !!private$id,
-            values_from = .value
-          ) |>
-          dplyr::select(-.covariate)
-
-        treated_col <- as.character(private$treated_ids)
-        donor_cols  <- colnames(X)
-
-        X  <- rbind(X,  as.data.frame(cov_wide[, donor_cols,  drop = FALSE]))
-        X1 <- c(X1, unlist(cov_wide[, treated_col, drop = TRUE]))
-      }
-
+      # `donor_ids` is needed by .build_predictor_matrix(); set it before the
+      # augmentation step so both the NASC and non-NASC branches use the same
+      # column ordering.
       donor_ids  <- colnames(X_pred)
       treated_id <- as.character(private$treated_ids)
       private$donor_ids <- donor_ids
+
+      use_covariate_rows <- !private$nasc_penalty &&
+        (!is.null(private$covariates) ||
+           !is.null(private$special_predictors))
+
+      pred_labels_step2 <- character(0)
+      v_pred_step2      <- numeric(0)
+
+      if (use_covariate_rows) {
+        pred_mat <- .build_predictor_matrix(
+          data               = private$data,
+          covariates         = private$covariates,
+          id                 = private$id,
+          time               = private$time,
+          outcome            = private$outcome,
+          treated_id         = treated_id,
+          donor_ids          = donor_ids,
+          intervention       = private$intervention,
+          predictors_op      = private$predictors_op,
+          special_predictors = private$special_predictors,
+          time_pred_prior    = private$time_predictors_prior
+        )
+
+        if (length(pred_mat$names) > 0L) {
+          # Append predictor rows to the outcome-pre-period matching matrix.
+          # The donor-column ordering of pred_mat$X0 already matches X.
+          X  <- rbind(as.data.frame(X),
+                      as.data.frame(pred_mat$X0,
+                                    check.names = FALSE,
+                                    row.names = NULL))
+          X1 <- c(X1, pred_mat$X1)
+          pred_labels_step2 <- pred_mat$names
+          private$predictor_labels <- pred_labels_step2
+          v_pred_step2 <- .resolve_predictor_weights(
+            private$predictor_weights, pred_labels_step2
+          )
+        }
+      }
 
       W_J      <- NULL
       w_J1     <- NULL
@@ -525,37 +575,25 @@ nascSynth <- R6::R6Class(
 
       # STEP 2
       if (private$nasc_penalty) {
-        if (!is.null(private$covariates)) {
-          cov_names_step2 <- setdiff(
-            names(private$covariates),
-            c(rlang::as_name(private$time), rlang::as_name(private$id))
+        if (!is.null(private$covariates) ||
+            !is.null(private$special_predictors)) {
+          pred_mat_step2 <- .build_predictor_matrix(
+            data               = private$data,
+            covariates         = private$covariates,
+            id                 = private$id,
+            time               = private$time,
+            outcome            = private$outcome,
+            treated_id         = treated_id,
+            donor_ids          = donor_ids,
+            intervention       = private$intervention,
+            predictors_op      = private$predictors_op,
+            special_predictors = private$special_predictors,
+            time_pred_prior    = private$time_predictors_prior
           )
-        } else {
-          cov_names_step2 <- character(0)
-        }
-        if (length(cov_names_step2) > 0L) {
-          cov_means <- private$covariates |>
-            dplyr::filter(!!private$time < private$intervention) |>
-            dplyr::group_by(!!private$id) |>
-            dplyr::summarise(
-              dplyr::across(dplyr::all_of(cov_names_step2), mean),
-              .groups = "drop"
-            ) |>
-            tidyr::pivot_longer(
-              cols      = dplyr::all_of(cov_names_step2),
-              names_to  = ".covariate",
-              values_to = ".value"
-            ) |>
-            tidyr::pivot_wider(
-              names_from  = !!private$id,
-              values_from = .value
-            )
-          K_cov_step2 <- nrow(cov_means)
-          X_cov0_mat  <- as.matrix(cov_means[, donor_ids,  drop = FALSE])
-          X_cov1_vec  <- as.numeric(cov_means[[treated_id]])
-          if (anyNA(X_cov0_mat) || anyNA(X_cov1_vec)) {
-            stop("Missing values in covariate-matching rows for Step 2; please impute or drop.")
-          }
+          K_cov_step2 <- length(pred_mat_step2$names)
+          X_cov0_mat  <- pred_mat_step2$X0
+          X_cov1_vec  <- pred_mat_step2$X1
+          private$predictor_labels <- pred_mat_step2$names
         } else {
           K_cov_step2 <- 0L
           X_cov0_mat  <- matrix(numeric(0), nrow = 0, ncol = length(donor_ids))
@@ -563,14 +601,9 @@ nascSynth <- R6::R6Class(
         }
 
         if (K_cov_step2 > 0L) {
-          if (!is.null(private$predictor_weights)) {
-            if (!all(cov_names_step2 %in% names(private$predictor_weights))) {
-              stop("predictor_weights names do not cover all covariates seen in Step 2.")
-            }
-            v_cov_vec <- as.numeric(private$predictor_weights[cov_names_step2])
-          } else {
-            v_cov_vec <- rep(1.0, K_cov_step2)
-          }
+          v_cov_vec <- .resolve_predictor_weights(
+            private$predictor_weights, private$predictor_labels
+          )
         } else {
           v_cov_vec <- numeric(0)
         }
@@ -634,14 +667,16 @@ nascSynth <- R6::R6Class(
         N_outcome  <- n_pre_real
         N_aug      <- N_total - N_outcome
         if (N_aug > 0L) {
-          if (!is.null(private$predictor_weights)) {
-            if (!all(cov_names %in% names(private$predictor_weights))) {
-              stop("predictor_weights names do not cover all covariates seen in Step 2.")
-            }
-            v_aug_vec <- as.numeric(private$predictor_weights[cov_names])
-          } else {
-            v_aug_vec <- rep(1.0, N_aug)
+          # v_pred_step2 was computed up above by .resolve_predictor_weights()
+          # against the predictor labels returned by .build_predictor_matrix().
+          # Sanity check the lengths line up (defensive: should never fail).
+          if (length(v_pred_step2) != N_aug) {
+            stop(sprintf(
+              "Internal: predictor-weight vector length (%d) does not match ",
+              length(v_pred_step2)),
+              sprintf("number of augmented matching rows (%d).", N_aug))
           }
+          v_aug_vec <- v_pred_step2
         } else {
           v_aug_vec <- numeric(0)
         }

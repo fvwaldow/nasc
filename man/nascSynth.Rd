@@ -80,7 +80,10 @@ Create a new nascSynth object.
   rho = NULL,
   bias_correction = NULL,
   nasc_penalty = NULL,
-  predictor_weights = NULL
+  predictor_weights = NULL,
+  predictors.op = "mean",
+  special.predictors = NULL,
+  time.predictors.prior = NULL
 )}\if{html}{\out{</div>}}
 }
 
@@ -128,16 +131,75 @@ for SAR/SDM/exogenous and \code{FALSE} for
 model-aware default as \code{bias_correction}.}
 
 \item{\code{predictor_weights}}{Optional non-negative numeric vector giving the
-importance weight for each covariate in the Step-2 SCM matching loss
-(the diagonal of Abadie-Diamond-Hainmueller's V matrix; same role as
-the \code{vs} argument in the bsynth package). Length must equal the
-number of covariate columns in \code{covariates}, in the same column
-order. \code{NULL} (default) gives equal weight (= 1) to every
-covariate. Setting an entry to 0 removes that covariate from the
+importance weight for each \emph{predictor row} in the Step-2 SCM
+matching loss (the diagonal of Abadie-Diamond-Hainmueller's V matrix;
+same role as the \code{vs} argument in the bsynth package). With the
+default \code{predictors.op = "mean"} and no \code{special.predictors},
+predictor rows are exactly the columns of \code{covariates} and the
+length must match the number of covariate columns. When
+\code{special.predictors} adds extra rows, the vector must cover all
+predictor rows that result from the combined regular and special
+specification. Two input forms are accepted: a \emph{named} numeric
+vector (matched by row label, e.g. \code{c(x1 = 1, x2 = 0.5,
+"Y_mean_1993" = 2)}) or an \emph{unnamed} numeric vector of the right
+length (matched positionally, regular predictors first in the order
+given in \code{covariates}, then special predictors in the order
+given). \code{NULL} (default) gives equal weight (= 1) to every
+predictor row. Setting an entry to 0 removes that row from the
 matching loss without dropping it from the data. Outcome rows always
 carry implicit weight 1; \code{predictor_weights} only re-scales the
-covariate-matching contribution. Has no effect when \code{covariates}
-is \code{NULL}.}
+predictor-matching contribution. Has no effect when neither
+\code{covariates} nor \code{special.predictors} is supplied.}
+
+\item{\code{predictors.op}}{Character string naming the operator
+applied to every regular predictor (i.e. every non-id, non-time
+column in \code{covariates}) over the pre-treatment period. Any
+function name resolvable by \code{\link[base]{match.fun}} is
+accepted; \code{"mean"} (default) and \code{"median"} are the
+common choices. The chosen operator is applied unit-by-unit and
+\code{NA}s are dropped before aggregation. Mirrors
+\code{predictors.op} in the \pkg{Synth} package's
+\code{dataprep()}.}
+
+\item{\code{special.predictors}}{Optional list giving Synth-style
+\dQuote{special predictors}: each predictor specified here
+contributes one extra matching row, computed by applying a chosen
+operator over a chosen subset of pre-treatment periods. Each entry
+must be a list of length 3:
+\enumerate{
+\item the predictor, given either as a column name (character)
+present in \code{data} or in \code{covariates}, or as a column
+number referencing \code{data};
+\item a numeric vector of time periods to aggregate over
+(e.g. \code{1990:2000} or \code{1980});
+\item a character string naming the operator (e.g. \code{"mean"},
+\code{"median"}).
+}
+For example,
+\preformatted{
+special.predictors = list(
+  list("x1", 1990:2000, "mean"),
+  list("x2", 1980:1983, "median"),
+  list("x3", 1980,      "mean")
+)
+}
+specifies that \code{x1} is matched on its pre-period mean over
+1990-2000, \code{x2} on its 1980-1983 median, and \code{x3} on its
+1980 value alone. Lagged outcomes (\code{list("Y", 1993, "mean")})
+are a typical use even when the outcome variable is not part of
+\code{covariates}. Each entry produces a row labelled
+\code{<var>_<op>_<period>} in the matching matrix; these labels are
+also used to match \code{predictor_weights}. Mirrors
+\code{special.predictors} in the \pkg{Synth} package's
+\code{dataprep()}. Default \code{NULL} (no special predictors).}
+
+\item{\code{time.predictors.prior}}{Optional numeric vector of
+pre-treatment time periods over which regular predictors are
+aggregated by \code{predictors.op}. Default \code{NULL} aggregates
+over all pre-intervention periods (the previous behaviour). Has no
+effect on \code{special.predictors}, whose time windows are set
+per-entry. Mirrors \code{time.predictors.prior} in the \pkg{Synth}
+package's \code{dataprep()}.}
 }
 \if{html}{\out{</div>}}
 }

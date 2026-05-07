@@ -89,7 +89,7 @@ comparison helpers for overlaying several fitted models.
 
 | Function / method | Purpose |
 |----|----|
-| `nascSynth$new(...)` | Constructs an estimator. Selects a Stan model based on `spatial_model`, `bias_correction`, and `nasc_penalty`. Optionally accepts `predictor_weights` to set a diagonal V matrix on the covariate-matching loss in Step 2. |
+| `nascSynth$new(...)` | Constructs an estimator. Selects a Stan model based on `spatial_model`, `bias_correction`, and `nasc_penalty`. Predictors used in Step-2 covariate matching are specified in **Synth**-compatible style (`covariates`, `predictors.op`, `special.predictors`, `time.predictors.prior`), and the resulting predictor rows can be reweighted in the matching loss via `predictor_weights` (the diagonal V matrix). |
 | `mod$fit(n_samples, n_samples_cap, n_samples_min, cores, worker_iter, worker_warmup, ...)` | Runs the (optional) Step 1 spatial model and the Step 2 synthetic-control model via MCMC |
 | `mod$summary(ci_width, print)` | Posterior summary: ATT, per-period τₜ, donor weights, model parameters, and MCMC diagnostics. When the model uses a network, also reports per-period and per-donor indirect (spillover) effects and the average indirect effect. Also dispatched via `summary(mod)` |
 | `mod$indirectEffect()` | Posterior draws and summaries of the indirect (spillover) effect at the per-period and per-donor level. Returns `NULL` for non-network configurations |
@@ -109,7 +109,10 @@ comparison helpers for overlaying several fitted models.
 | `rho` | `NULL` | Optional scalar in (-1, 1). Required when `spatial_model = "exogenous"`; supplying it for any other choice skips Step 1. |
 | `bias_correction` | model-aware | `TRUE` for SAR/SDM/exogenous, `FALSE` for `"none"`. |
 | `nasc_penalty` | model-aware | Same default rule as `bias_correction`. |
-| `predictor_weights` | `NULL` | Optional non-negative numeric vector with one entry per covariate, equivalent to the diagonal of Abadie-Diamond-Hainmueller’s V matrix. `NULL` gives equal weight to every covariate; setting an entry to 0 drops that covariate from the matching loss. |
+| `predictor_weights` | `NULL` | Optional non-negative numeric vector with one entry per predictor row, equivalent to the diagonal of Abadie-Diamond-Hainmueller’s V matrix. Accepts either a named vector (matched by predictor row label) or an unnamed vector of the right length (matched positionally; regular covariates first, then `special.predictors` in user order). `NULL` gives equal weight to every predictor row; setting an entry to 0 drops that row from the matching loss. |
+| `predictors.op` | `"mean"` | Character string naming the operator applied to every regular predictor (every non-`id`, non-`time` column in `covariates`) over the pre-treatment period. Any name resolvable by `match.fun()` works (`"mean"`, `"median"`, etc.). Mirrors `predictors.op` in the **Synth** package. |
+| `special.predictors` | `NULL` | Synth-style list of length-3 specifications `list(<predictor>, <time periods>, <operator>)`, one per extra matching row. The predictor may be any column in `data` or `covariates`, so lagged outcomes (e.g. `list("y", 1993, "mean")`) are supported without restating them as covariates. Mirrors `special.predictors` in the **Synth** package. |
+| `time.predictors.prior` | `NULL` | Optional numeric vector of pre-treatment periods over which regular predictors are aggregated. Default `NULL` uses all pre-intervention periods. Does not affect `special.predictors`. Mirrors `time.predictors.prior` in the **Synth** package. |
 
 #### `fit()` arguments
 
@@ -147,6 +150,48 @@ All plotting methods produce base R graphics.
 | `nascPlot(models, show_ci)` | Overlays the synthetic and direct-effect plots of a named list of fitted `nascSynth` objects |
 | `nascWeight(models, ...)` | Multi-model ridgeline of posterior donor-weight densities, one row per donor, one density per model, sharing the colour palette of `nascPlot()` |
 
+### Synth-style predictor matching
+
+When covariates are involved in the Step-2 matching loss, `nasc` follows
+the same convention as the
+[**Synth**](https://cran.r-project.org/package=Synth) package. Every
+column in the `covariates` panel becomes a “regular” predictor whose
+values are aggregated over the pre-treatment period by a single operator
+(`predictors.op`, default `"mean"`); additional matching rows can be
+specified one-by-one through `special.predictors`, each with its own
+predictor, time window, and operator. This makes it straightforward to
+match on, say, the long-run mean of `x1`, the median of `x2` over a
+short window, or the value of the outcome itself in a single lag year:
+
+``` r
+mod <- nascSynth$new(
+  data       = panel,
+  time       = year,
+  id         = id,
+  treated    = treated,
+  outcome    = y,
+  covariates = panel_covs,             # x1, x2 used as regular predictors
+  predictors.op = "mean",              # default; applied to x1 and x2
+  special.predictors = list(
+    list("x1", 1990:1995, "mean"),     # x1 averaged over a sub-window
+    list("x2", 1992,      "median"),   # x2 single-year median
+    list("y",  1993,      "mean")      # lagged outcome (from `data`)
+  ),
+  predictor_weights = c(x1 = 1, x2 = 0.5,
+                        x1_mean_1990_1995 = 1,
+                        x2_median_1992    = 1,
+                        y_mean_1993       = 2)
+)
+```
+
+Each `special.predictors` entry produces a matching row labelled
+`<var>_<op>_<period>`; those labels are also used to match a named
+`predictor_weights` vector, so the weight on every matching row is
+unambiguous. Predictors referenced from `special.predictors` may live in
+`data` (handy for lagged outcomes) or in `covariates`. Setting a
+`predictor_weights` entry to 0 removes that row from the matching loss
+without dropping it from the data.
+
 ## Methodological notes
 
 The estimator decomposes into two steps that the package dispatches
@@ -164,18 +209,22 @@ NASC penalty is active, no spatial parameter is needed and Step 1 is
 skipped entirely.
 
 **Step 2 — NASC weight estimation.** Donor weights *w* are estimated on
-the pre-treatment outcome panel (and, when applicable, on covariate
-moments weighted by `predictor_weights`). The post-treatment
-counterfactual is reconstructed as a convex combination of the donor
-pool; if `bias_correction = TRUE`, it is rescaled by the bias-correction
-factor 1 / (1 − ⟨w, s⟩), so that contamination of the donor pool by
-spillovers from the treated unit is accounted for. If
-`nasc_penalty = TRUE`, the log-likelihood includes a penalty term −λ⟨w,
-\|s\|⟩, which discourages weight on units with strong network exposure
-to the treated unit. When several *ρ* draws are propagated from Step 1,
-Step 2 is run in parallel across them with `furrr` (one Stan fit per
-*ρ*, single-chain `worker_iter` iterations each) and the resulting
-posteriors are pooled to approximate the cut posterior.
+the pre-treatment outcome panel and, when covariates or
+`special.predictors` are supplied, on a set of predictor rows produced
+from the panel by `predictors.op` and `special.predictors` (Synth-style
+aggregation; see *Synth-style predictor matching* above), each row
+carrying its own weight in the matching loss via `predictor_weights`.
+The post-treatment counterfactual is reconstructed as a convex
+combination of the donor pool; if `bias_correction = TRUE`, it is
+rescaled by the bias-correction factor 1 / (1 − ⟨w, s⟩), so that
+contamination of the donor pool by spillovers from the treated unit is
+accounted for. If `nasc_penalty = TRUE`, the log-likelihood includes a
+penalty term −λ⟨w, \|s\|⟩, which discourages weight on units with strong
+network exposure to the treated unit. When several *ρ* draws are
+propagated from Step 1, Step 2 is run in parallel across them with
+`furrr` (one Stan fit per *ρ*, single-chain `worker_iter` iterations
+each) and the resulting posteriors are pooled to approximate the cut
+posterior.
 
 **Cut posterior.** *ρ* enters Step 2 as data, not as a parameter.
 Conditional on each *ρ* draw, Step 2’s likelihood and posterior are
