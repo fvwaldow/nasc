@@ -272,6 +272,323 @@
 }
 
 
+# ----------------------------------------------------------------------------
+# Internal helper: build the predictor-matching matrix in Synth-style.
+#
+# Returns a list with:
+#   X1    : numeric vector of length K (treated unit's predictor values)
+#   X0    : numeric matrix of dim K x J (donor predictor values, donors in
+#           the same column order as `donor_ids`)
+#   names : character vector of length K with row labels (used downstream
+#           for predictor_weights matching and diagnostics)
+#
+# Regular predictors come first (in the order they appear in `covariates`,
+# excluding the id/time columns), then special predictors in user order.
+#
+# Inputs
+# ------
+# data               : the full long-format panel (must contain `id`, `time`,
+#                      `outcome`, plus any columns referenced from
+#                      `special.predictors`).
+# covariates         : NULL or long-format data frame keyed by id/time with
+#                      one column per regular predictor.
+# id, time, outcome  : quosures (as stored on the R6 object).
+# treated_id         : character scalar -- the id of the treated unit.
+# donor_ids          : character vector -- ids of the donor units, in the
+#                      column order required by the caller.
+# intervention       : the first treated time period.
+# predictors_op      : single character, name of the aggregator function for
+#                      regular predictors (e.g. "mean", "median").
+# special_predictors : NULL or list of length-3 lists
+#                      list(<var>, <times>, <op>).
+# time_pred_prior    : NULL (= all pre-intervention periods) or numeric
+#                      vector of pre-intervention periods to aggregate over
+#                      for regular predictors.
+# ----------------------------------------------------------------------------
+.build_predictor_matrix <- function(data,
+                                    covariates,
+                                    id,
+                                    time,
+                                    outcome,
+                                    treated_id,
+                                    donor_ids,
+                                    intervention,
+                                    predictors_op = "mean",
+                                    special_predictors = NULL,
+                                    time_pred_prior = NULL) {
+
+  id_name      <- rlang::as_name(id)
+  time_name    <- rlang::as_name(time)
+  outcome_name <- rlang::as_name(outcome)
+
+  # --- Validate predictors.op ------------------------------------------------
+  if (!is.character(predictors_op) || length(predictors_op) != 1L ||
+      is.na(predictors_op) || !nzchar(predictors_op)) {
+    stop("'predictors.op' must be a single non-empty character string ",
+         "(e.g. \"mean\", \"median\").")
+  }
+  op_fun <- tryCatch(match.fun(predictors_op),
+                     error = function(e) {
+                       stop("predictors.op = '", predictors_op,
+                            "' could not be resolved to a function: ",
+                            conditionMessage(e))
+                     })
+  agg_fun <- function(x) op_fun(x[!is.na(x)])
+
+  unit_order <- c(donor_ids, treated_id)
+
+  # --- Regular predictors (from `covariates`) --------------------------------
+  reg_names <- if (is.null(covariates)) {
+    character(0)
+  } else {
+    setdiff(names(covariates), c(time_name, id_name))
+  }
+
+  X0_reg <- matrix(numeric(0), nrow = 0L, ncol = length(donor_ids),
+                   dimnames = list(NULL, donor_ids))
+  X1_reg <- numeric(0)
+  reg_labels <- character(0)
+
+  if (length(reg_names) > 0L) {
+    cov_pre <- covariates |>
+      dplyr::filter(!!time < intervention)
+    if (!is.null(time_pred_prior)) {
+      cov_pre <- cov_pre |> dplyr::filter(!!time %in% time_pred_prior)
+      if (nrow(cov_pre) == 0L) {
+        stop("'time.predictors.prior' selects no rows in the covariate panel.")
+      }
+    }
+
+    cov_agg <- cov_pre |>
+      dplyr::group_by(!!id) |>
+      dplyr::summarise(
+        dplyr::across(dplyr::all_of(reg_names), agg_fun),
+        .groups = "drop"
+      )
+
+    # Wide layout: rows = predictors, columns = units (donors + treated).
+    cov_wide <- cov_agg |>
+      tidyr::pivot_longer(
+        cols      = dplyr::all_of(reg_names),
+        names_to  = ".predictor",
+        values_to = ".value"
+      ) |>
+      tidyr::pivot_wider(
+        names_from  = !!id,
+        values_from = .value
+      )
+
+    if (!all(unit_order %in% names(cov_wide))) {
+      missing <- setdiff(unit_order, names(cov_wide))
+      stop("Covariates are missing values for unit(s): ",
+           paste(missing, collapse = ", "))
+    }
+
+    cov_wide <- cov_wide |> dplyr::arrange(match(.predictor, reg_names))
+    reg_labels <- as.character(cov_wide$.predictor)
+
+    X0_reg <- as.matrix(cov_wide[, donor_ids,  drop = FALSE])
+    X1_reg <- as.numeric(unlist(cov_wide[, treated_id, drop = TRUE]))
+
+    if (anyNA(X0_reg) || anyNA(X1_reg)) {
+      stop("NA values produced when aggregating regular predictors. ",
+           "Check the covariate panel and 'time.predictors.prior'.")
+    }
+  }
+
+  # --- Special predictors ----------------------------------------------------
+  X0_sp <- matrix(numeric(0), nrow = 0L, ncol = length(donor_ids),
+                  dimnames = list(NULL, donor_ids))
+  X1_sp <- numeric(0)
+  sp_labels <- character(0)
+
+  if (!is.null(special_predictors)) {
+    if (!is.list(special_predictors)) {
+      stop("'special.predictors' must be a list of length-3 lists.")
+    }
+
+    .colname_from_ref <- function(ref, src_df, what) {
+      if (is.character(ref) && length(ref) == 1L) {
+        if (!ref %in% names(src_df)) {
+          stop(what, ": column '", ref, "' not found in `data` ",
+               "(or `covariates`).")
+        }
+        return(ref)
+      }
+      if (is.numeric(ref) && length(ref) == 1L) {
+        idx <- as.integer(ref)
+        if (idx < 1L || idx > ncol(src_df)) {
+          stop(what, ": column index ", idx, " out of range.")
+        }
+        return(names(src_df)[idx])
+      }
+      stop(what, ": predictor reference must be a column name (character) ",
+           "or column number (numeric scalar).")
+    }
+
+    sp_X0_list <- vector("list", length(special_predictors))
+    sp_X1_list <- numeric(length(special_predictors))
+
+    for (i in seq_along(special_predictors)) {
+      entry <- special_predictors[[i]]
+      what  <- sprintf("special.predictors[[%d]]", i)
+
+      if (!is.list(entry) || length(entry) != 3L) {
+        stop(what, ": each entry must be a list of length 3 ",
+             "(predictor, time periods, operator).")
+      }
+      ref       <- entry[[1]]
+      sp_times  <- entry[[2]]
+      sp_op_str <- entry[[3]]
+
+      # Operator
+      if (!is.character(sp_op_str) || length(sp_op_str) != 1L ||
+          is.na(sp_op_str) || !nzchar(sp_op_str)) {
+        stop(what, ": operator must be a single non-empty character string.")
+      }
+      sp_op_fun <- tryCatch(match.fun(sp_op_str),
+                            error = function(e) {
+                              stop(what, ": operator '", sp_op_str,
+                                   "' could not be resolved to a function.")
+                            })
+      sp_agg <- function(x) sp_op_fun(x[!is.na(x)])
+
+      # Time periods
+      if (!is.numeric(sp_times) || length(sp_times) < 1L ||
+          anyNA(sp_times)) {
+        stop(what, ": time periods must be a non-empty numeric vector ",
+             "without NAs.")
+      }
+      if (any(sp_times >= intervention)) {
+        warning(what, ": time periods include post-intervention periods; ",
+                "Synth conventionally uses only pre-intervention periods.")
+      }
+
+      # Resolve the predictor column. Try `covariates` first if it has the
+      # name, otherwise fall back to `data` (so users can match on lagged
+      # outcomes or any panel column without restating it as a covariate).
+      colname <- NULL
+      src_df  <- NULL
+      if (!is.null(covariates) && is.character(ref) && length(ref) == 1L &&
+          ref %in% names(covariates)) {
+        colname <- ref
+        src_df  <- covariates
+      } else if (is.character(ref) && length(ref) == 1L &&
+                 ref %in% names(data)) {
+        colname <- ref
+        src_df  <- data
+      } else {
+        # Numeric reference or unresolved character: try data first, then
+        # covariates. (Numeric column numbers refer to `data` to mirror
+        # Synth's behaviour.)
+        if (is.numeric(ref)) {
+          colname <- .colname_from_ref(ref, data, what)
+          src_df  <- data
+        } else {
+          stop(what, ": predictor '", ref, "' not found in `data` or `covariates`.")
+        }
+      }
+
+      sp_pre <- src_df |>
+        dplyr::filter(!!time %in% sp_times) |>
+        dplyr::select(!!id, !!time, dplyr::all_of(colname))
+
+      if (nrow(sp_pre) == 0L) {
+        stop(what, ": no rows match the requested time periods (",
+             paste(range(sp_times), collapse = "-"), ").")
+      }
+
+      sp_agg_df <- sp_pre |>
+        dplyr::group_by(!!id) |>
+        dplyr::summarise(.value = sp_agg(.data[[colname]]),
+                         .groups = "drop")
+
+      vals <- setNames(sp_agg_df$.value,
+                       as.character(sp_agg_df[[id_name]]))
+      if (!all(unit_order %in% names(vals))) {
+        missing <- setdiff(unit_order, names(vals))
+        stop(what, ": missing values for unit(s): ",
+             paste(missing, collapse = ", "))
+      }
+
+      donor_vec   <- as.numeric(vals[donor_ids])
+      treated_val <- as.numeric(vals[treated_id])
+      if (anyNA(donor_vec) || is.na(treated_val)) {
+        stop(what, ": NA aggregate produced for some units.")
+      }
+
+      sp_X0_list[[i]] <- donor_vec
+      sp_X1_list[i]   <- treated_val
+
+      # Build a compact label: <var>_<op>_<period-summary>
+      tt <- sort(unique(sp_times))
+      period_lab <- if (length(tt) == 1L) {
+        as.character(tt)
+      } else if (all(diff(tt) == 1)) {
+        sprintf("%s_%s", tt[1], tt[length(tt)])
+      } else {
+        paste(tt, collapse = "_")
+      }
+      sp_labels[i] <- sprintf("%s_%s_%s", colname, sp_op_str, period_lab)
+    }
+
+    if (length(sp_X0_list) > 0L) {
+      X0_sp <- do.call(rbind, sp_X0_list)
+      colnames(X0_sp) <- donor_ids
+      X1_sp <- sp_X1_list
+    }
+  }
+
+  # --- Combine ---------------------------------------------------------------
+  X0 <- rbind(X0_reg, X0_sp)
+  X1 <- c(X1_reg, X1_sp)
+  nm <- c(reg_labels, sp_labels)
+
+  if (length(nm) > 0L) {
+    rownames(X0) <- nm
+    names(X1)    <- nm
+  }
+
+  list(X1 = X1, X0 = X0, names = nm)
+}
+
+
+# ----------------------------------------------------------------------------
+# Internal helper: resolve a predictor_weights argument to a numeric vector
+# aligned with the predictor labels produced by .build_predictor_matrix().
+#
+# Accepts either a named numeric vector (matched by name) or an unnamed
+# numeric vector of the right length (matched positionally).
+# ----------------------------------------------------------------------------
+.resolve_predictor_weights <- function(predictor_weights, pred_names) {
+  K <- length(pred_names)
+  if (is.null(predictor_weights)) {
+    return(rep(1.0, K))
+  }
+  if (!is.numeric(predictor_weights) ||
+      any(!is.finite(predictor_weights)) ||
+      any(predictor_weights < 0)) {
+    stop("predictor_weights must be a finite, non-negative numeric vector.")
+  }
+  pw_names <- names(predictor_weights)
+  if (!is.null(pw_names) && all(nzchar(pw_names))) {
+    if (!all(pred_names %in% pw_names)) {
+      missing <- setdiff(pred_names, pw_names)
+      stop("predictor_weights is missing entries for: ",
+           paste(missing, collapse = ", "))
+    }
+    return(as.numeric(predictor_weights[pred_names]))
+  }
+  if (length(predictor_weights) != K) {
+    stop(sprintf(
+      "predictor_weights has length %d but %d predictor row(s) were built.",
+      length(predictor_weights), K
+    ))
+  }
+  as.numeric(predictor_weights)
+}
+
+
 .plot_tau <- function(data, x, y, ymin, ymax, xintercept) {
   data <- as.data.frame(data)
 
