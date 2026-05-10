@@ -30,12 +30,18 @@ transformed data {
   int N = J + 1;
 
   // ---- Standardize Y by grand pre-treatment mean / SD ----
+  // sd_y / sd_x are HOISTED out of any inner block so that `generated
+  // quantities` can read them and back-transform beta to the original
+  // scale. Stan's transformed-data variables persist across blocks; the
+  // per-k `s` previously declared inside the loop was local to one
+  // iteration and not visible later.
   real mean_y = mean(to_vector(Y_panel));
   real sd_y   = sd(to_vector(Y_panel));
   matrix[N, T0] Y_std  = (Y_panel - mean_y) / sd_y;
   matrix[N, T0] WY_std = W * Y_std;
 
   // ---- Assemble + standardize the covariate tensor ----
+  vector[K_pred] sd_x;                       // per-covariate grand SD, kept for back-transform
   array[K_pred] matrix[N, T0] X_full_std;
   for (k in 1:K_pred) {
     matrix[N, T0] Xk;
@@ -46,6 +52,7 @@ transformed data {
     }
     real m = mean(to_vector(Xk));
     real s = sd(to_vector(Xk));
+    sd_x[k] = s;
     // Guard sd: a fully-constant covariate (all units, all periods)
     // would give s = 0 and divide-by-zero. Keep the column at zero
     // in that case; the within transform would zero it out anyway.
@@ -108,4 +115,15 @@ model {
 
 generated quantities {
   real rho_out = rho;
+
+  // ---- Back-transform beta to the original (un-standardized) scale ----
+  // The model fits on Y_std = (Y - mean_y) / sd_y and X_std_k = (X_k - m_k) / sd_x_k,
+  // so the sampled beta lives on the standardized scale:
+  //   beta_stan_k = beta_true_k * sd_x_k / sd_y.
+  // beta_orig undoes that. Constant covariates (sd_x = 0) cannot be identified;
+  // they are returned as not-a-number so downstream code can flag them.
+  vector[K_pred] beta_orig;
+  for (k in 1:K_pred) {
+    beta_orig[k] = sd_x[k] > 1e-12 ? beta[k] * sd_y / sd_x[k] : not_a_number();
+  }
 }

@@ -798,6 +798,73 @@
   if (parts$uses_rho && !all(is.na(rhos))) {
     param_rows[["rho"]] <- .posterior_summary(as.numeric(rhos), ci)
   }
+
+  # ----------------------------------------------------------------
+  # Step-1 covariate coefficients (back-transformed to the original
+  # scale by the Stan models as `beta_orig` and `theta_orig`).
+  #
+  # Pulled directly off the Step-1 rstan fit when one is present.
+  # Each covariate's posterior gets its own row, labelled with the
+  # covariate name when available. Time-invariant covariates (whose
+  # `beta_identified` flag is FALSE) are skipped: their posteriors
+  # simply mirror the prior, so reporting them would be misleading.
+  # ----------------------------------------------------------------
+  .add_step1_coef_rows <- function(par_name, label_prefix) {
+    if (is.null(parts$fitted)) return(invisible(NULL))
+    arr <- tryCatch(
+      rstan::extract(parts$fitted, pars = par_name, permuted = TRUE)[[par_name]],
+      error = function(e) NULL
+    )
+    if (is.null(arr)) return(invisible(NULL))
+    if (!is.matrix(arr)) arr <- matrix(arr, ncol = 1L)
+    K_b <- ncol(arr)
+    if (K_b == 0L) return(invisible(NULL))
+    cn <- parts$cov_names
+    labs <- if (!is.null(cn) && length(cn) == K_b) {
+      sprintf("%s[%s]", label_prefix, cn)
+    } else if (K_b > 1L) {
+      sprintf("%s[%d]", label_prefix, seq_len(K_b))
+    } else {
+      label_prefix
+    }
+    keep <- if (!is.null(parts$beta_identified) &&
+                length(parts$beta_identified) == K_b) {
+      parts$beta_identified
+    } else {
+      rep(TRUE, K_b)
+    }
+    for (k in seq_len(K_b)) {
+      if (!isTRUE(keep[k])) next
+      col_k <- arr[, k]
+      col_k <- col_k[is.finite(col_k)]
+      if (length(col_k) < 2L) next
+      param_rows[[labs[k]]] <<- .posterior_summary(col_k, ci)
+    }
+    invisible(NULL)
+  }
+  .add_step1_coef_rows("beta_orig",  "beta")
+  .add_step1_coef_rows("theta_orig", "theta")
+
+  # Step-1 sigma (named differently per Stan model: sigma_sar vs sigma_sdm).
+  # rstan::extract() with pars= errors if any requested name is absent, so
+  # try each one independently and take whichever the fit actually has.
+  if (!is.null(parts$fitted)) {
+    .extract_one <- function(par_name) {
+      tryCatch(
+        rstan::extract(parts$fitted, pars = par_name, permuted = TRUE)[[par_name]],
+        error = function(e) NULL
+      )
+    }
+    sig_draws <- .extract_one("sigma_sar") %||% .extract_one("sigma_sdm")
+    if (!is.null(sig_draws)) {
+      v <- as.numeric(sig_draws)
+      v <- v[is.finite(v)]
+      if (length(v) >= 2L) {
+        param_rows[["sigma_step1"]] <- .posterior_summary(v, ci)
+      }
+    }
+  }
+
   param_tbl <- if (length(param_rows)) {
     tibble::as_tibble(do.call(rbind, param_rows), rownames = "parameter")
   } else NULL

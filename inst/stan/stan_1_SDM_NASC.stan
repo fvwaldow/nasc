@@ -32,12 +32,16 @@ transformed data {
   int N = J + 1;
 
   // ---- Standardize Y by grand pre-treatment mean / SD ----
+  // sd_y / sd_x are HOISTED out of any inner block so that `generated
+  // quantities` can read them and back-transform beta and theta to the
+  // original scale.
   real mean_y = mean(to_vector(Y_panel));
   real sd_y   = sd(to_vector(Y_panel));
   matrix[N, T0] Y_std  = (Y_panel - mean_y) / sd_y;
   matrix[N, T0] WY_std = W * Y_std;
 
   // ---- Assemble + standardize the covariate tensor X_full_std ----
+  vector[K_pred] sd_x;                        // per-covariate grand SD, kept for back-transform
   array[K_pred] matrix[N, T0] X_full_std;
   for (k in 1:K_pred) {
     matrix[N, T0] Xk;
@@ -48,6 +52,7 @@ transformed data {
     }
     real m = mean(to_vector(Xk));
     real s = sd(to_vector(Xk));
+    sd_x[k] = s;
     X_full_std[k] = s > 1e-12 ? (Xk - m) / s : rep_matrix(0.0, N, T0);
   }
 
@@ -132,4 +137,24 @@ model {
 
 generated quantities {
   real rho_out = rho;
+
+  // ---- Back-transform beta and theta to the original (un-standardized) scale ----
+  // The model fits on Y_std = (Y - mean_y) / sd_y and X_std_k = (X_k - m_k) / sd_x_k,
+  // with WX_full_std built from the already-standardized X (so WX_std also
+  // carries the 1/sd_x_k factor). Both coefficients therefore satisfy
+  //   param_stan_k = param_true_k * sd_x_k / sd_y,
+  // and the back-transform is the same for beta and theta. Constant covariates
+  // (sd_x = 0) cannot be identified; they are returned as not-a-number so
+  // downstream code can flag them.
+  vector[K_pred] beta_orig;
+  vector[K_pred] theta_orig;
+  for (k in 1:K_pred) {
+    if (sd_x[k] > 1e-12) {
+      beta_orig[k]  = beta[k]  * sd_y / sd_x[k];
+      theta_orig[k] = theta[k] * sd_y / sd_x[k];
+    } else {
+      beta_orig[k]  = not_a_number();
+      theta_orig[k] = not_a_number();
+    }
+  }
 }

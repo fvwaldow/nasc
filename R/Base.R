@@ -158,9 +158,6 @@ nascSynth <- R6::R6Class(
       private$special_predictors    <- special.predictors
       private$time_predictors_prior <- time.predictors.prior
 
-      # predictor_weights: only shape-agnostic checks here. The
-      # length/name match against the final predictor row labels happens in
-      # $fit() once .build_predictor_matrix() has run.
       if (!is.null(predictor_weights)) {
         if (is.null(covariates) && is.null(special.predictors)) {
           stop("predictor_weights was supplied but neither 'covariates' nor ",
@@ -329,9 +326,6 @@ nascSynth <- R6::R6Class(
 
       n_pre_real <- nrow(pre_data)
 
-      # `donor_ids` is needed by .build_predictor_matrix(); set it before the
-      # augmentation step so both the NASC and non-NASC branches use the same
-      # column ordering.
       donor_ids  <- colnames(X_pred)
       treated_id <- as.character(private$treated_ids)
       private$donor_ids <- donor_ids
@@ -359,8 +353,6 @@ nascSynth <- R6::R6Class(
         )
 
         if (length(pred_mat$names) > 0L) {
-          # Append predictor rows to the outcome-pre-period matching matrix.
-          # The donor-column ordering of pred_mat$X0 already matches X.
           X  <- rbind(as.data.frame(X),
                       as.data.frame(pred_mat$X0,
                                     check.names = FALSE,
@@ -493,7 +485,7 @@ nascSynth <- R6::R6Class(
         }
       }
 
-      # STEP 1 (only if needed)
+      # STEP 1 (if needed)
       sampled_rhos <- if (private$uses_rho) {
         if (!is.null(private$rho_exogenous)) {
           private$rho_exogenous
@@ -503,8 +495,8 @@ nascSynth <- R6::R6Class(
             K_pred   = K_pred,
             J        = length(donor_ids),
             T0       = nrow(pre_data),
-            X1       = X1_arr,         # T0 x K_pred       -> array[T0] vector[K_pred]
-            X0       = X0_arr,         # T0 x K_pred x J   -> array[T0] matrix[K_pred, J]
+            X1       = X1_arr,         # T0 x K_pred
+            X0       = X0_arr,         # T0 x K_pred x J
             Y_panel  = Y_panel,        # (J+1) x T0
             W        = W_full,
             lambda_W = lambda_W
@@ -667,9 +659,6 @@ nascSynth <- R6::R6Class(
         N_outcome  <- n_pre_real
         N_aug      <- N_total - N_outcome
         if (N_aug > 0L) {
-          # v_pred_step2 was computed up above by .resolve_predictor_weights()
-          # against the predictor labels returned by .build_predictor_matrix().
-          # Sanity check the lengths line up (defensive: should never fail).
           if (length(v_pred_step2) != N_aug) {
             stop(sprintf(
               "Internal: predictor-weight vector length (%d) does not match ",
@@ -824,6 +813,8 @@ nascSynth <- R6::R6Class(
         uses_rho        = private$uses_rho,
         rho_source      = rho_source,
         fitted          = private$fitted,
+        cov_names       = private$cov_names,
+        beta_identified = private$beta_identified,
         model           = self
       ))
 
@@ -933,6 +924,14 @@ nascSynth <- R6::R6Class(
         list()
       }
 
+
+      if (!is.null(step1_draws$beta_orig)) {
+        step1_draws$beta <- step1_draws$beta_orig
+      }
+      if (!is.null(step1_draws$theta_orig)) {
+        step1_draws$theta <- step1_draws$theta_orig
+      }
+
       if (!is.null(step1_draws$rho)) {
         add_panel("rho", step1_draws$rho)
       }
@@ -1004,7 +1003,7 @@ nascSynth <- R6::R6Class(
         if (!is.null(private$y_synth_draws$lambda)) {
           add_panel("lambda", private$y_synth_draws$lambda)
         }
-        # sigma_sc (penalty model) or sigma (model1); whichever is present.
+        # sigma_sc (penalty model) or sigma (model1)
         if (!is.null(private$y_synth_draws$sigma_sc)) {
           add_panel("sigma_step2", private$y_synth_draws$sigma_sc)
         } else if (!is.null(private$y_synth_draws$sigma)) {
