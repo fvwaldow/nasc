@@ -631,7 +631,7 @@ nascSynth <- R6::R6Class(
           cores         = cores,
           extra_args    = list(...),
           extract_pars  = c("y_counterfactual", "y_sim_pre", "w", "lambda",
-                            "sigma_sc", "bias_correction"),
+                            "lambda_tilde", "sigma_sc", "bias_correction"),
           worker_iter   = worker_iter,
           worker_warmup = worker_warmup
         )
@@ -643,6 +643,7 @@ nascSynth <- R6::R6Class(
           y_sim_pre        = results$y_sim_pre,
           w                = results$w,
           lambda           = results$lambda,
+          lambda_tilde     = results$lambda_tilde,
           sigma_sc         = results$sigma_sc,
           bias_correction  = results$bias_correction,
           rhos_used        = results$rhos_used,

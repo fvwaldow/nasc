@@ -9,8 +9,8 @@
 // Generated-quantity names (y_sim_pre, y_counterfactual) match model1.stan so
 // a single R post-processing path handles both.
 //
-// COVARIATE MATCHING (new):
-//   This file now mirrors model1.stan's optional augmented matching: when
+// COVARIATE MATCHING:
+//   This file mirrors model1.stan's optional augmented matching: when
 //   covariates are supplied, the simplex weights w must reconcile not only
 //   the pre-treatment outcome trajectory but also the pre-period covariate
 //   means of the treated unit against a w-weighted mix of donor covariate
@@ -28,6 +28,39 @@
 //   so v_cov[k] = 1 (default) recovers equal weighting and v_cov[k] = 0
 //   removes covariate k from the matching loss without dropping it from the
 //   data. Outcome rows always have implicit weight 1.
+//
+// LAMBDA SCALING (unit-information reparameterization):
+//   The NASC penalty term -lambda * <w, |s|> is on a different natural scale
+//   than the Gaussian likelihood, which scales linearly in the effective
+//   number of likelihood contributions
+//
+//       n_eff = T0 + sum(v_cov)
+//
+//   (T0 outcome rows each contributing weight 1, plus K_cov covariate rows
+//   contributing weight v_cov[k] to the Fisher information in w). Sampling
+//   lambda directly on the raw scale puts the prior on a parameter whose
+//   data-informed region is O(n_eff), causing severe prior sensitivity when
+//   the prior (e.g. gamma(2,1)) places negligible mass there.
+//
+//   The fix is to sample lambda_tilde on a unit-information scale and
+//   recover lambda = lambda_tilde * n_eff. With this rescaling,
+//   lambda_tilde ~ O(1) means "penalty competes with the likelihood at
+//   O(1)", which is what a unit-scale prior like gamma(2,1) intends. The
+//   raw lambda is still exposed in generated quantities so downstream R
+//   code that extracts "lambda" continues to work unchanged.
+//
+//   Note: we do NOT also divide by max|s| (or any other summary of |s|).
+//   The contamination vector s = rho * (I - rho W)^{-1} w_{J1} already
+//   shrinks toward zero as rho -> 0, which is the correct statement of
+//   "no contamination problem when there is no spatial spillover".
+//   Dividing the penalty by max|s| would cancel exactly this rho-dependence
+//   and force the penalty to act with the same strength regardless of how
+//   much contamination is actually present. The current scaling preserves
+//   that: when rho is small, the penalty is correctly weak (and lambda is
+//   accordingly weakly identified, with its posterior reflecting the prior);
+//   when rho is large, the penalty has real bite and lambda becomes
+//   data-informed. The pooled MI posterior across rho draws is then a
+//   honest mixture that reflects rho's role in identification.
 
 data {
   // NASC Specific Data
@@ -109,20 +142,39 @@ transformed data {
   // -------------------------------------------------------------
   vector[J] s = rho * mdivide_left(I_J - rho * W_J, w_J1);
   vector[J] s_abs = fabs(s);
+
+  // -------------------------------------------------------------
+  // EFFECTIVE LIKELIHOOD SIZE FOR LAMBDA RESCALING
+  //   n_eff = T0 + sum(v_cov)
+  // T0 outcome rows each contribute Fisher information of weight 1 in w;
+  // each covariate row k contributes v_cov[k] (since its precision is
+  // v_cov[k] / sigma_sc^2). Rows with v_cov[k] = 0 contribute nothing,
+  // consistent with their omission from the likelihood loop below.
+  // -------------------------------------------------------------
+  real n_eff = T0 + sum(v_cov);
 }
 
 parameters {
   simplex[J] w;                  // NASC donor weights
   real<lower=0> sigma_sc;        // Residual SD on standardized scale
-  real<lower=0> lambda;          // NASC penalty strength (always active here)
+  real<lower=0> lambda_tilde;    // NASC penalty strength on unit-information scale
+}
+
+transformed parameters {
+  // Recover the raw penalty strength so downstream R code that extracts
+  // "lambda" from the fit continues to work unchanged. Both lambda and
+  // lambda_tilde are exposed in generated quantities for diagnostics.
+  real<lower=0> lambda = lambda_tilde * n_eff;
 }
 
 model {
   // Priors
-  sigma_sc ~ normal(0, 1);
-  lambda   ~ gamma(2, 1);
+  sigma_sc     ~ normal(0, 1);
+  lambda_tilde ~ gamma(2, 1);     // Unit-information scale: O(1) is meaningful.
 
-  // NASC Penalty (always on in this file)
+  // NASC Penalty (always on in this file). The penalty contribution is
+  // -lambda_tilde * n_eff * <w, |s|>, so for lambda_tilde ~ O(1) the
+  // penalty competes with the likelihood at O(1) per likelihood unit.
   target += -lambda * dot_product(w, s_abs);
 
   // Likelihood, augmented by covariate-matching rows when K_cov > 0.
