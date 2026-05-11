@@ -170,7 +170,7 @@ transformed parameters {
 model {
   // Priors
   sigma_sc     ~ normal(0, 1);
-  lambda_tilde ~ gamma(2, 1);     // Unit-information scale: O(1) is meaningful.
+  lambda_tilde ~ cauchy(0, 1);     // Unit-information scale: O(1) is meaningful.
 
   // NASC Penalty (always on in this file). The penalty contribution is
   // -lambda_tilde * n_eff * <w, |s|>, so for lambda_tilde ~ O(1) the
