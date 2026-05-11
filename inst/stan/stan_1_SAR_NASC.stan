@@ -23,7 +23,14 @@ data {
 
   matrix[J + 1, T0] Y_panel;
   matrix[J + 1, J + 1] W;
-  vector[J + 1] lambda_W;
+
+  // Eigenvalues of W, split into real and imaginary parts. For symmetric
+  // W the imaginary parts are zero and the Jacobian below collapses to the
+  // simple real-only form; otherwise the full complex-modulus formula
+  // applies. R-side code is responsible for supplying both (the eigen
+  // decomposition is computed once per fit, so this is essentially free).
+  vector[J + 1] lambda_W_re;
+  vector[J + 1] lambda_W_im;
 }
 
 transformed data {
@@ -102,7 +109,15 @@ model {
   beta      ~ normal(0, 1);
 
   // ---- Jacobian for Y -> (I - rho W) Y, applied each period ----
-  real log_det_A = sum(log1m(rho * lambda_W));
+  // log|det(I - rho W)| = sum_i log|1 - rho * lambda_i|
+  //                     = 0.5 * sum_i log( (1 - rho*Re(lambda_i))^2 + (rho*Im(lambda_i))^2 )
+  // Complex eigenvalues of real W come in conjugate pairs, so the
+  // imaginary contributions add (rather than cancel) in the modulus.
+  // When W is symmetric, lambda_W_im is zero and this collapses to the
+  // original real-only sum log1m(rho * lambda).
+  real log_det_A = 0.5 * sum(log(
+      square(1 - rho * lambda_W_re) + square(rho * lambda_W_im)
+  ));
   target += T0 * log_det_A;
 
   // ---- Within-SAR likelihood ----
