@@ -240,32 +240,29 @@
 
 
 .makeWide <- function(data, id, time, outcome, treatment) {
-  data <- data |>
-    dplyr::mutate(.tmp_id = as.integer(as.factor(!!id)))
-
-  treated <- data |>
+  id_name <- rlang::as_name(id)
+  treated_lab <- data |>
     dplyr::filter(status == "Treated") |>
-    dplyr::select(.tmp_id) |>
+    dplyr::select(!!id) |>
     dplyr::distinct() |>
-    dplyr::pull(.tmp_id)
+    dplyr::pull(!!id)
+  treated_lab <- as.character(treated_lab)
 
   wide_df_treated <- data |>
-    dplyr::filter(.tmp_id %in% treated) |>
+    dplyr::filter(as.character(!!id) %in% treated_lab) |>
     dplyr::select(!!time, !!treatment, !!outcome)
 
   wide_df_untreated <- data |>
-    dplyr::filter(!(.tmp_id %in% treated)) |>
+    dplyr::filter(!(as.character(!!id) %in% treated_lab)) |>
     dplyr::select(!!time, !!outcome, !!id) |>
     tidyr::pivot_wider(
-      names_from = !!id,
+      names_from  = !!id,
       values_from = !!outcome
     )
 
   dplyr::inner_join(wide_df_treated, wide_df_untreated,
-                    by = rlang::as_name(time)
-  )
+                    by = rlang::as_name(time))
 }
-
 
 # ----------------------------------------------------------------------------
 # Internal helper: build the predictor-matching matrix in Synth-style.
