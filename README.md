@@ -14,9 +14,9 @@ Control (NASC)** estimator. It is based on the methodology of von Waldow
 (2026) and addresses the limitations of conventional synthetic control
 methods when SUTVA is violated and interference between units prevails.
 
-The estimator follows a **modular Bayesian (cut-posterior) workflow**: a
+The estimator follows a **modular Bayesian (cut-posterior) via multiple imputation**: a
 spatial autocorrelation parameter *ρ* is first estimated from a SAR or
-SDM panel model, and then propagated as fixed data into a
+SDM panel model, and then propagated into a
 synthetic-control likelihood that estimates donor weights, the optional
 NASC penalty, and the bias-correction factor. The cut prevents feedback
 from the synthetic-control fit back into the spatial model.
@@ -33,7 +33,7 @@ pak::pkg_install("fvwaldow/nasc")
 As the package compiles Stan models at install time, a working C++
 toolchain and a recent version of
 [**rstan**](https://mc-stan.org/rstan/) is needed. The contamination and
-effect network plots additionally depend on **igraph**, which can be
+effect network plots depend on **igraph**, which can be
 installed with `install.packages("igraph")`.
 
 ## Quick Start
@@ -47,8 +47,6 @@ packageDescription("nasc")
 # List all functions in the package
 ls("package:nasc")
 ```
-
-A minimal end-to-end workflow looks like this:
 
 ``` r
 library(nasc)
@@ -82,10 +80,6 @@ mod$effectPlot()                 # tau_t with credible interval
 ## Usage
 
 ### Core functions
-
-The package exposes a single user-facing [**R6**](https://r6.r-lib.org/)
-class, `nascSynth`, several stand-alone diagnostic plot functions, and
-comparison helpers for overlaying several fitted models.
 
 | Function / method | Purpose |
 |----|----|
@@ -133,8 +127,6 @@ avoids oversampling a low-information posterior of *ρ*.
 
 ### Visualization functions
 
-All plotting methods produce base R graphics.
-
 | Method / function | Output |
 |----|----|
 | `mod$syntheticPlot()` | Observed vs. synthetic outcome path with credible band |
@@ -149,108 +141,6 @@ All plotting methods produce base R graphics.
 | `contaminationScatter(model, ...)` | Per-donor scatter of posterior-mean weight against posterior-mean contamination |
 | `nascPlot(models, show_ci)` | Overlays the synthetic and direct-effect plots of a named list of fitted `nascSynth` objects |
 | `nascWeight(models, ...)` | Multi-model ridgeline of posterior donor-weight densities, one row per donor, one density per model, sharing the colour palette of `nascPlot()` |
-
-### Synth-style predictor matching
-
-When covariates are involved in the Step-2 matching loss, `nasc` follows
-the same convention as the
-[**Synth**](https://cran.r-project.org/package=Synth) package. Every
-column in the `covariates` panel becomes a “regular” predictor whose
-values are aggregated over the pre-treatment period by a single operator
-(`predictors.op`, default `"mean"`); additional matching rows can be
-specified one-by-one through `special.predictors`, each with its own
-predictor, time window, and operator. This makes it straightforward to
-match on, say, the long-run mean of `x1`, the median of `x2` over a
-short window, or the value of the outcome itself in a single lag year:
-
-``` r
-mod <- nascSynth$new(
-  data       = panel,
-  time       = year,
-  id         = id,
-  treated    = treated,
-  outcome    = y,
-  covariates = panel_covs,             # x1, x2 used as regular predictors
-  predictors.op = "mean",              # default; applied to x1 and x2
-  special.predictors = list(
-    list("x1", 1990:1995, "mean"),     # x1 averaged over a sub-window
-    list("x2", 1992,      "median"),   # x2 single-year median
-    list("y",  1993,      "mean")      # lagged outcome (from `data`)
-  ),
-  predictor_weights = c(x1 = 1, x2 = 0.5,
-                        x1_mean_1990_1995 = 1,
-                        x2_median_1992    = 1,
-                        y_mean_1993       = 2)
-)
-```
-
-Each `special.predictors` entry produces a matching row labelled
-`<var>_<op>_<period>`; those labels are also used to match a named
-`predictor_weights` vector, so the weight on every matching row is
-unambiguous. Predictors referenced from `special.predictors` may live in
-`data` (handy for lagged outcomes) or in `covariates`. Setting a
-`predictor_weights` entry to 0 removes that row from the matching loss
-without dropping it from the data.
-
-## Methodological notes
-
-The estimator decomposes into two steps that the package dispatches
-automatically.
-
-**Step 1 — spatial model.** When `spatial_model` is `"SAR"` or `"SDM"`
-and no exogenous `rho` is supplied, a Bayesian SAR or Spatial Durbin
-Model is fit on the pre-treatment panel using the user-supplied
-covariates. Posterior draws of *ρ* are stratified across chains and
-propagated to Step 2 as fixed data (`n_samples` controls the size of the
-propagated subsample, or `"auto"` selects it from the Step-1 ESS). When
-`spatial_model = "exogenous"`, Step 1 is skipped and the user-supplied
-scalar `rho` is used directly. When neither the bias correction nor the
-NASC penalty is active, no spatial parameter is needed and Step 1 is
-skipped entirely.
-
-**Step 2 — NASC weight estimation.** Donor weights *w* are estimated on
-the pre-treatment outcome panel and, when covariates or
-`special.predictors` are supplied, on a set of predictor rows produced
-from the panel by `predictors.op` and `special.predictors` (Synth-style
-aggregation; see *Synth-style predictor matching* above), each row
-carrying its own weight in the matching loss via `predictor_weights`.
-The post-treatment counterfactual is reconstructed as a convex
-combination of the donor pool; if `bias_correction = TRUE`, it is
-rescaled by the bias-correction factor 1 / (1 − ⟨w, s⟩), so that
-contamination of the donor pool by spillovers from the treated unit is
-accounted for. If `nasc_penalty = TRUE`, the log-likelihood includes a
-penalty term −λ⟨w, \|s\|⟩, which discourages weight on units with strong
-network exposure to the treated unit. When several *ρ* draws are
-propagated from Step 1, Step 2 is run in parallel across them with
-`furrr` (one Stan fit per *ρ*, single-chain `worker_iter` iterations
-each) and the resulting posteriors are pooled to approximate the cut
-posterior.
-
-**Cut posterior.** *ρ* enters Step 2 as data, not as a parameter.
-Conditional on each *ρ* draw, Step 2’s likelihood and posterior are
-sealed off from Step 1, so the synthetic-control fit cannot inform the
-spatial model. The final approximation to the cut posterior is the
-equally-weighted Monte Carlo mixture over the propagated *ρ* draws.
-Per-worker MCMC diagnostics (split-Rhat, n_eff, divergent transitions,
-max-treedepth saturation) are tracked and summarized by `mod$summary()`.
-
-**Indirect effects.** When the model uses a network, the per-donor
-spillover at post-period *t* is δᵢₜᴺᴬˢᶜ = sᵢ · τ₁ₜᴺᴬˢᶜ (Proposition
-6.2), with the contamination vector s = ρ (Iⱼ − ρWⱼ)⁻¹ wⱼ₁ pulled from
-each posterior draw. `mod$indirectEffect()` returns the full posterior
-tensor, while `summary()`, `attPlot()` and `tauPlot()` surface the
-per-period donor-average and the scalar average indirect effect (the
-spillover analog of the ATT). For a network-graph view, see
-`effectGraph()`.
-
-**Spatial weights.** The matrix `W` must be row-standardized and known a
-priori. The code checks this explicitly and aligns row/column names with
-the unit identifier so that donor and treated rows can be picked
-unambiguously.
-
-**Identification scope.** The current implementation supports a single
-treated unit. Multiple treated units, staggered adoption, and
-non-stationary network structures are subject to further research.
 
 ## Citation
 
