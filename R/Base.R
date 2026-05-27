@@ -270,7 +270,7 @@ nascSynth <- R6::R6Class(
         } else {
           NULL
         },
-        step2 = if (nasc_penalty) stanmodels$stan_2_NASC else stanmodels$model1
+        step2 = stanmodels$stan_2_NASC   # unified model; use_penalty flag selects path
       )
     },
 
@@ -491,6 +491,13 @@ nascSynth <- R6::R6Class(
         }
       }
 
+      # Always build Y_panel for the unified step-2 Stan model.
+      if (is.null(Y_panel)) {
+        Y_panel <- t(as.matrix(
+          pre_data |> dplyr::select(dplyr::all_of(donor_ids), !!private$outcome)
+        ))
+      }
+
       # STEP 1 (only if needed)
       sampled_rhos <- if (private$uses_rho) {
         if (!is.null(private$rho_exogenous)) {
@@ -617,6 +624,7 @@ nascSynth <- R6::R6Class(
           Y0_post             = as.matrix(X_pred[, donor_ids, drop = FALSE]),
           Y1_post             = as.array(as.numeric(post_data |> dplyr::pull(!!private$outcome))),
           use_bias_correction = as.integer(private$bias_correction),
+          use_penalty         = 1L,
           K_cov               = K_cov_step2,
           X_cov0              = X_cov0_mat,
           X_cov1              = if (K_cov_step2 > 0L) as.array(X_cov1_vec) else numeric(0),
@@ -651,21 +659,18 @@ nascSynth <- R6::R6Class(
         )
 
       } else {
-        if (private$bias_correction) {
-          J_bc   <- ncol(X)
-          W_J_bc <- W_J
-          w_J1_bc <- w_J1
-          rho_bc <- if (length(sampled_rhos) == 1L) sampled_rhos else NA_real_
-        } else {
-          J_bc    <- 0L
-          W_J_bc  <- matrix(0, 0, 0)
-          w_J1_bc <- numeric(0)
-          rho_bc  <- 0
-        }
+        # No-penalty path: use the same unified Stan model (stan_2_NASC) with
+        # use_penalty = 0L.  The data interface is the same panel format used
+        # by the penalty path; covariate rows that were previously appended to
+        # X/X1 by R are now passed as separate X_cov0/X_cov1 inputs so that
+        # Stan can standardize them independently of the outcome rows.
 
-        N_total    <- nrow(X)
-        N_outcome  <- n_pre_real
-        N_aug      <- N_total - N_outcome
+        J_n       <- length(donor_ids)
+        N_total   <- nrow(X)
+        N_outcome <- n_pre_real     # = T0: outcome rows only
+        N_aug     <- N_total - N_outcome
+
+        # Extract covariate sub-matrices from the augmented X/X1 (if any).
         if (N_aug > 0L) {
           if (length(v_pred_step2) != N_aug) {
             stop(sprintf(
@@ -673,28 +678,49 @@ nascSynth <- R6::R6Class(
               length(v_pred_step2)),
               sprintf("number of augmented matching rows (%d).", N_aug))
           }
-          v_aug_vec <- v_pred_step2
+          X_cov0_mat_nop <- as.matrix(X[(N_outcome + 1L):N_total, donor_ids,
+                                         drop = FALSE])  # K_cov x J
+          X_cov1_vec_nop <- as.numeric(X1[(N_outcome + 1L):length(X1)])
+          v_cov_vec_nop  <- v_pred_step2
         } else {
-          v_aug_vec <- numeric(0)
+          X_cov0_mat_nop <- matrix(numeric(0), nrow = 0L, ncol = J_n)
+          X_cov1_vec_nop <- numeric(0)
+          v_cov_vec_nop  <- numeric(0)
+        }
+
+        # When bias correction is off we have no meaningful rho, W_J, or w_J1.
+        # Pass rho = 0 and dummy spatial matrices: s = rho*(...)^{-1}*w_J1 = 0
+        # when rho = 0, so bias_correction collapses to 1 regardless of W/w.
+        if (private$bias_correction) {
+          W_J_nop  <- W_J
+          w_J1_nop <- w_J1
+        } else {
+          W_J_nop  <- diag(J_n)      # identity: invertible, irrelevant at rho=0
+          w_J1_nop <- rep(0, J_n)
         }
 
         base_data <- list(
-          N                   = nrow(X),
-          y                   = as.array(as.numeric(X1)),
-          K                   = ncol(X),
-          X                   = as.matrix(X),
-          N_pred              = nrow(X_pred),
-          X_pred              = as.matrix(X_pred),
+          J                   = J_n,
+          T0                  = N_outcome,
+          Y_panel             = Y_panel,
+          W_J                 = W_J_nop,
+          w_J1                = w_J1_nop,
+          T_post              = nrow(X_pred),
+          Y0_post             = as.matrix(X_pred[, donor_ids, drop = FALSE]),
+          Y1_post             = as.array(as.numeric(
+                                  post_data |> dplyr::pull(!!private$outcome))),
           use_bias_correction = as.integer(private$bias_correction),
-          J_bc                = J_bc,
-          W_J                 = W_J_bc,
-          w_J1                = if (J_bc > 0L) as.array(as.numeric(w_J1_bc)) else numeric(0),
-          rho_bc              = if (private$bias_correction) rho_bc else 0,
-          N_outcome           = N_outcome,
-          v_aug               = if (N_aug > 0L) as.array(v_aug_vec) else numeric(0)
+          use_penalty         = 0L,
+          K_cov               = N_aug,
+          X_cov0              = X_cov0_mat_nop,
+          X_cov1              = if (N_aug > 0L) as.array(X_cov1_vec_nop) else numeric(0),
+          v_cov               = if (N_aug > 0L) as.array(v_cov_vec_nop) else numeric(0)
         )
 
         if (!private$bias_correction) {
+          # Single run: no rho loop needed.
+          base_data$rho <- 0
+
           private$fitted <- rstan::sampling(
             private$stan_model$step2,
             data  = base_data,
@@ -704,15 +730,14 @@ nascSynth <- R6::R6Class(
 
           draws <- rstan::extract(
             private$fitted,
-            pars = c("y_counterfactual", "y_sim_pre", "w", "sigma",
+            pars = c("y_counterfactual", "y_sim_pre", "w", "sigma_sc",
                      "bias_correction")
           )
-          y_sim_pre_trim <- draws$y_sim_pre[, seq_len(n_pre_real), drop = FALSE]
           private$y_synth_draws <- list(
             y_counterfactual = draws$y_counterfactual,
-            y_sim_pre        = y_sim_pre_trim,
+            y_sim_pre        = draws$y_sim_pre,
             w                = draws$w,
-            sigma            = draws$sigma,
+            sigma_sc         = draws$sigma_sc,
             bias_correction  = draws$bias_correction,
             rhos_used        = NA_real_
           )
@@ -722,10 +747,10 @@ nascSynth <- R6::R6Class(
             rhos          = sampled_rhos,
             base_data     = base_data,
             step2_mod     = private$stan_model$step2,
-            rho_field     = "rho_bc",
+            rho_field     = "rho",
             cores         = cores,
             extra_args    = list(...),
-            extract_pars  = c("y_counterfactual", "y_sim_pre", "w", "sigma",
+            extract_pars  = c("y_counterfactual", "y_sim_pre", "w", "sigma_sc",
                               "bias_correction"),
             worker_iter   = worker_iter,
             worker_warmup = worker_warmup
@@ -733,14 +758,13 @@ nascSynth <- R6::R6Class(
 
           if (is.null(private$fitted)) private$fitted <- results$last_fit
 
-          y_sim_pre_trim <- results$y_sim_pre[, seq_len(n_pre_real), drop = FALSE]
           private$y_synth_draws <- list(
-            y_counterfactual = results$y_counterfactual,
-            y_sim_pre        = y_sim_pre_trim,
-            w                = results$w,
-            sigma            = results$sigma,
-            bias_correction  = results$bias_correction,
-            rhos_used        = results$rhos_used,
+            y_counterfactual   = results$y_counterfactual,
+            y_sim_pre          = results$y_sim_pre,
+            w                  = results$w,
+            sigma_sc           = results$sigma_sc,
+            bias_correction    = results$bias_correction,
+            rhos_used          = results$rhos_used,
             worker_diagnostics = results$worker_diagnostics
           )
         }
@@ -1016,11 +1040,8 @@ nascSynth <- R6::R6Class(
         if (!is.null(private$y_synth_draws$lambda)) {
           add_panel("lambda", private$y_synth_draws$lambda)
         }
-        # sigma_sc (penalty model) or sigma (model1); whichever is present.
         if (!is.null(private$y_synth_draws$sigma_sc)) {
           add_panel("sigma_step2", private$y_synth_draws$sigma_sc)
-        } else if (!is.null(private$y_synth_draws$sigma)) {
-          add_panel("sigma_step2", private$y_synth_draws$sigma)
         }
         if (!is.null(private$y_synth_draws$bias_correction)) {
           add_panel("bias_correction", private$y_synth_draws$bias_correction)

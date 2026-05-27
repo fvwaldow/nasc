@@ -3,8 +3,8 @@
 # ----------------------------------------------------------------------------
 # Internal helper: run Step 2 across one or many rho draws.
 #
-# Used by both engines (stan_2_NASC sets rho_field = "rho", model1 sets
-# rho_field = "rho_bc"). When length(rhos) == 1, runs a single Stan fit with
+# Used for both the penalty and no-penalty paths (rho_field = "rho" in both).
+# When length(rhos) == 1, runs a single Stan fit with
 # default chains/iter. When > 1, runs the parallel furrr loop with reduced
 # chains (1) per worker.
 # ----------------------------------------------------------------------------
