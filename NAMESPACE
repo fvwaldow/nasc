@@ -6,7 +6,6 @@ export(nascPlot)
 export(nascWeight)
 export(effectGraph)
 export(contaminationGraph)
-export(contaminationScatter)
 
 # S3 methods
 S3method(print,summary.nascSynth)
