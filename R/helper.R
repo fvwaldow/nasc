@@ -1,13 +1,7 @@
 # Helper Functions
 
-# ----------------------------------------------------------------------------
-# Internal helper: run Step 2 across one or many rho draws.
-#
-# Used for both the penalty and no-penalty paths (rho_field = "rho" in both).
-# When length(rhos) == 1, runs a single Stan fit with
-# default chains/iter. When > 1, runs the parallel furrr loop with reduced
-# chains (1) per worker.
-# ----------------------------------------------------------------------------
+
+# run module 2 across one or many rho draws
 .run_step2_loop <- function(rhos, base_data, step2_mod, rho_field, cores,
                             extra_args, extract_pars,
                             worker_iter = 2000L, worker_warmup = 1000L) {
@@ -45,11 +39,6 @@
 
     run_worker <- function(single_rho, base_data, step2_mod, rho_field,
                            extract_pars, worker_iter, worker_warmup) {
-      # Silence "package built under R version X.Y.Z" warnings emitted at
-      # worker startup. This is scoped to the package-load call only and
-      # does NOT swallow Stan diagnostics (divergences, treedepth, low BFMI,
-      # Rhat, n_eff): those are emitted via message() / Stan's own logging
-      # channels, not warning(), so suppressWarnings() does not touch them.
       suppressWarnings(
         suppressPackageStartupMessages(require(rstan, quietly = TRUE))
       )
@@ -98,17 +87,10 @@
       draws
     }
 
-    # Filter only the "package built under R version X.Y.Z" warnings raised
-    # by worker spin-up (these come from R's package-loading machinery for
-    # rstan / StanHeaders / future / purrr and are pure version cosmetics).
-    # All other warnings -- including Stan numerical issues that might also
-    # be raised as conditions -- pass through unchanged. Stan's sampling
-    # diagnostics (divergences, treedepth, Rhat, n_eff) use message() and
-    # Stan's own logging, not warning(), so they are unaffected either way.
+    # Filter only the "package built under R version XXX"
     .is_build_version_warning <- function(w) {
       msg <- conditionMessage(w)
-      grepl("built under R version", msg, fixed = TRUE) ||
-        grepl("wurde unter R Version",  msg, fixed = TRUE)  # German locale
+      grepl("built under R version", msg, fixed = TRUE)
     }
 
     results_list <- withCallingHandlers(
@@ -167,13 +149,8 @@
   }
 }
 
-
+# Construct tidy plot data
 .get_nasc_results <- function(y_counterfactual_draws, bias_correction_draws, y_sim_pre_draws, pre_data, post_data, time, outcome, ci = 0.75) {
-  # Defensive: when every Step-2 worker fails to create the sampler, the
-  # parallel loop returns empty arrays that rbind down to NULL or a 0-row
-  # matrix. Without this check the caller eventually hits an opaque
-  # "non-numeric matrix extent" error inside matrix() far below; with it,
-  # the user gets an actionable message.
   if (is.null(y_counterfactual_draws) ||
       !is.matrix(y_counterfactual_draws) ||
       nrow(y_counterfactual_draws) == 0L) {
@@ -238,7 +215,7 @@
   dplyr::bind_rows(pre_plot, post_plot)
 }
 
-
+# Reshape the long panel into wide
 .makeWide <- function(data, id, time, outcome, treatment) {
   id_name <- rlang::as_name(id)
   treated_lab <- data |>
@@ -264,39 +241,7 @@
                     by = rlang::as_name(time))
 }
 
-# ----------------------------------------------------------------------------
-# Internal helper: build the predictor-matching matrix in Synth-style.
-#
-# Returns a list with:
-#   X1    : numeric vector of length K (treated unit's predictor values)
-#   X0    : numeric matrix of dim K x J (donor predictor values, donors in
-#           the same column order as `donor_ids`)
-#   names : character vector of length K with row labels (used downstream
-#           for predictor_weights matching and diagnostics)
-#
-# Regular predictors come first (in the order they appear in `covariates`,
-# excluding the id/time columns), then special predictors in user order.
-#
-# Inputs
-# ------
-# data               : the full long-format panel (must contain `id`, `time`,
-#                      `outcome`, plus any columns referenced from
-#                      `special.predictors`).
-# covariates         : NULL or long-format data frame keyed by id/time with
-#                      one column per regular predictor.
-# id, time, outcome  : quosures (as stored on the R6 object).
-# treated_id         : character scalar -- the id of the treated unit.
-# donor_ids          : character vector -- ids of the donor units, in the
-#                      column order required by the caller.
-# intervention       : the first treated time period.
-# predictors_op      : single character, name of the aggregator function for
-#                      regular predictors (e.g. "mean", "median").
-# special_predictors : NULL or list of length-3 lists
-#                      list(<var>, <times>, <op>).
-# time_pred_prior    : NULL (= all pre-intervention periods) or numeric
-#                      vector of pre-intervention periods to aggregate over
-#                      for regular predictors.
-# ----------------------------------------------------------------------------
+# construct module 2 predictor-matching matrix
 .build_predictor_matrix <- function(data,
                                     covariates,
                                     id,
@@ -313,7 +258,6 @@
   time_name    <- rlang::as_name(time)
   outcome_name <- rlang::as_name(outcome)
 
-  # --- Validate predictors.op ------------------------------------------------
   if (!is.character(predictors_op) || length(predictors_op) != 1L ||
       is.na(predictors_op) || !nzchar(predictors_op)) {
     stop("'predictors.op' must be a single non-empty character string ",
@@ -329,7 +273,6 @@
 
   unit_order <- c(donor_ids, treated_id)
 
-  # --- Regular predictors (from `covariates`) --------------------------------
   reg_names <- if (is.null(covariates)) {
     character(0)
   } else {
@@ -358,7 +301,6 @@
         .groups = "drop"
       )
 
-    # Wide layout: rows = predictors, columns = units (donors + treated).
     cov_wide <- cov_agg |>
       tidyr::pivot_longer(
         cols      = dplyr::all_of(reg_names),
@@ -388,7 +330,6 @@
     }
   }
 
-  # --- Special predictors ----------------------------------------------------
   X0_sp <- matrix(numeric(0), nrow = 0L, ncol = length(donor_ids),
                   dimnames = list(NULL, donor_ids))
   X1_sp <- numeric(0)
@@ -433,7 +374,6 @@
       sp_times  <- entry[[2]]
       sp_op_str <- entry[[3]]
 
-      # Operator
       if (!is.character(sp_op_str) || length(sp_op_str) != 1L ||
           is.na(sp_op_str) || !nzchar(sp_op_str)) {
         stop(what, ": operator must be a single non-empty character string.")
@@ -445,7 +385,6 @@
                             })
       sp_agg <- function(x) sp_op_fun(x[!is.na(x)])
 
-      # Time periods
       if (!is.numeric(sp_times) || length(sp_times) < 1L ||
           anyNA(sp_times)) {
         stop(what, ": time periods must be a non-empty numeric vector ",
@@ -456,9 +395,6 @@
                 "Synth conventionally uses only pre-intervention periods.")
       }
 
-      # Resolve the predictor column. Try `covariates` first if it has the
-      # name, otherwise fall back to `data` (so users can match on lagged
-      # outcomes or any panel column without restating it as a covariate).
       colname <- NULL
       src_df  <- NULL
       if (!is.null(covariates) && is.character(ref) && length(ref) == 1L &&
@@ -470,9 +406,6 @@
         colname <- ref
         src_df  <- data
       } else {
-        # Numeric reference or unresolved character: try data first, then
-        # covariates. (Numeric column numbers refer to `data` to mirror
-        # Synth's behaviour.)
         if (is.numeric(ref)) {
           colname <- .colname_from_ref(ref, data, what)
           src_df  <- data
@@ -512,7 +445,6 @@
       sp_X0_list[[i]] <- donor_vec
       sp_X1_list[i]   <- treated_val
 
-      # Build a compact label: <var>_<op>_<period-summary>
       tt <- sort(unique(sp_times))
       period_lab <- if (length(tt) == 1L) {
         as.character(tt)
@@ -531,7 +463,6 @@
     }
   }
 
-  # --- Combine ---------------------------------------------------------------
   X0 <- rbind(X0_reg, X0_sp)
   X1 <- c(X1_reg, X1_sp)
   nm <- c(reg_labels, sp_labels)
@@ -545,13 +476,7 @@
 }
 
 
-# ----------------------------------------------------------------------------
-# Internal helper: resolve a predictor_weights argument to a numeric vector
-# aligned with the predictor labels produced by .build_predictor_matrix().
-#
-# Accepts either a named numeric vector (matched by name) or an unnamed
-# numeric vector of the right length (matched positionally).
-# ----------------------------------------------------------------------------
+# transform predictor weights to numeric vector
 .resolve_predictor_weights <- function(predictor_weights, pred_names) {
   K <- length(pred_names)
   if (is.null(predictor_weights)) {
@@ -580,11 +505,10 @@
   as.numeric(predictor_weights)
 }
 
-
+# Plot TE trajectory with CrI
 .plot_tau <- function(data, x, y, ymin, ymax, xintercept) {
   data <- as.data.frame(data)
 
-  # Resolve column names whether passed as symbol/quosure/string
   resolve <- function(val, quo) {
     if (rlang::is_quosure(val))            return(rlang::as_name(val))
     if (is.character(val) && length(val) == 1L) return(val)
@@ -621,12 +545,13 @@
   invisible(NULL)
 }
 
-
-
+# Null-coalescing operator
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
+# Lower/upper probabilities for CrI
 .ci_probs <- function(ci) c((1 - ci) / 2, 1 - (1 - ci) / 2)
 
+# Summarize posterior draw vector
 .posterior_summary <- function(x, ci) {
   q <- stats::quantile(x, .ci_probs(ci), names = FALSE, na.rm = TRUE)
   c(
@@ -638,6 +563,7 @@
   )
 }
 
+# Extract MCMC diagnostics
 .mcmc_diagnostics <- function(fit) {
   if (is.null(fit)) return(NULL)
   diag <- tryCatch({
@@ -668,6 +594,7 @@
   diag
 }
 
+# Repack parallel worker diagnostics
 .worker_to_diagnostics <- function(wd) {
   if (is.null(wd)) return(NULL)
   list(
@@ -687,6 +614,7 @@
   )
 }
 
+# Compute summary statistics for fitted model
 .nasc_summary_stats <- function(parts) {
 
   ci         <- parts$ci_width
@@ -744,9 +672,7 @@
 
   w_mat <- draws$w
   treated_id  <- as.character(parts$treated_ids)
-  # Canonical donor ordering = colnames(X_pred) at fit time. Falling back
-  # to setdiff(levels(id), treated_id) silently scrambles labels whenever
-  # the long data isn't sorted by id.
+
   donor_ids <- parts$donor_ids
   if (is.null(donor_ids)) {
     warning("parts$donor_ids missing")
@@ -764,10 +690,6 @@
     lower = apply(w_mat, 2, \(x) stats::quantile(x, .ci_probs(ci)[1], names = FALSE)),
     upper = apply(w_mat, 2, \(x) stats::quantile(x, .ci_probs(ci)[2], names = FALSE))
   )
-  # Sort by descending unit index in the canonical donor ordering. The
-  # canonical ordering is the column ordering of w_mat (= donor_names);
-  # reversing it puts the highest-indexed donor first. This is independent
-  # of the posterior weight values, which are inspected via w_mean below.
   weight_tbl <- weight_tbl[rev(seq_len(nrow(weight_tbl))), , drop = FALSE]
 
   w_mean <- weight_tbl$mean
@@ -791,16 +713,7 @@
     param_rows[["rho"]] <- .posterior_summary(as.numeric(rhos), ci)
   }
 
-  # ----------------------------------------------------------------
-  # Step-1 covariate coefficients (back-transformed to the original
-  # scale by the Stan models as `beta_orig` and `theta_orig`).
-  #
-  # Pulled directly off the Step-1 rstan fit when one is present.
-  # Each covariate's posterior gets its own row, labelled with the
-  # covariate name when available. Time-invariant covariates (whose
-  # `beta_identified` flag is FALSE) are skipped: their posteriors
-  # simply mirror the prior, so reporting them would be misleading.
-  # ----------------------------------------------------------------
+  # Re-scale module 1 coefficients
   .add_step1_coef_rows <- function(par_name, label_prefix) {
     if (is.null(parts$fitted)) return(invisible(NULL))
     arr <- tryCatch(
@@ -837,9 +750,6 @@
   .add_step1_coef_rows("beta_orig",  "beta")
   .add_step1_coef_rows("theta_orig", "theta")
 
-  # Step-1 sigma (named differently per Stan model: sigma_sar vs sigma_sdm).
-  # rstan::extract() with pars= errors if any requested name is absent, so
-  # try each one independently and take whichever the fit actually has.
   if (!is.null(parts$fitted)) {
     .extract_one <- function(par_name) {
       tryCatch(
@@ -867,39 +777,26 @@
     .mcmc_diagnostics(parts$fitted)
   }
 
-  # ----------------------------------------------------------------
-  # Indirect (spillover) effects -- Proposition 6.2.
-  #
-  # Computed only when (i) a fitted model object is available on parts
-  # (so we can rebuild s from rho and W) AND (ii) the configuration uses
-  # rho. Without rho, spillover is identically zero by construction and
-  # we omit the indirect blocks rather than print zeros.
-  # ----------------------------------------------------------------
+
+  # Indirect effects
   indirect_per_period_avg   <- NULL  # per-period donor-average spillover
-  indirect_per_donor        <- NULL  # average across periods, per donor
-  indirect_avg              <- NULL  # scalar: average across periods of donor-average spillover
+  indirect_per_donor        <- NULL  # average across periods per donor
+  indirect_avg              <- NULL  # average across periods of donor-average spillover
   if (isTRUE(parts$uses_rho) && !is.null(parts$model)) {
     ind <- tryCatch(
       .nasc_indirect_draws(parts$model),
       error = function(e) NULL
     )
     if (!is.null(ind)) {
-      delta_total_draws <- ind$delta_total                  # [n_draws x T_post]
-      avg_per_donor_dr  <- ind$avg_per_donor                # [n_draws x J]
+      delta_total_draws <- ind$delta_total                  # n_draws x T_post
+      avg_per_donor_dr  <- ind$avg_per_donor                # n_draws x J
       J                 <- ncol(avg_per_donor_dr)
 
-      # Per-period donor-AVERAGE spillover (instead of donor-total):
-      #   delta_avg_t^(d) = (1/J) * sum_i delta_{i,t}^{NASC, (d)}
-      # We construct the [n_draws x T_post] matrix once and feed it
-      # into the column summaries below so the CrI reflects the
-      # posterior of the average directly.
+      # Per-period donor-average spillover
       delta_avg_draws <- delta_total_draws / J
 
-      # Scalar "average indirect effect": per-draw average across
-      # post-periods of the donor-average spillover. Equivalently the
-      # per-draw average across BOTH dimensions (donors x time) of the
-      # full delta tensor, which is the spillover analog of the ATT.
-      avg_indirect_draws <- rowMeans(delta_avg_draws)         # [n_draws]
+      # average indirect effect
+      avg_indirect_draws <- rowMeans(delta_avg_draws)         # n_draws
 
       indirect_per_period_avg <- tibble::tibble(
         !!time_nm := ind$time_post,
@@ -918,12 +815,7 @@
         upper = apply(avg_per_donor_dr, 2, \(x) stats::quantile(x, .ci_probs(ci)[2], names = FALSE)),
         p_pos = apply(avg_per_donor_dr, 2, \(x) mean(x > 0))
       )
-      # Sort by descending unit index in the canonical donor ordering.
-      # ind$donor_names already carries the canonical ordering (matches
-      # the column ordering of s_mat); reversing it puts the highest-
-      # indexed donor first. This is independent of the spillover
-      # magnitudes, so a small-effect donor at the top of the canonical
-      # list still appears first.
+      # Sort by descending unit index
       indirect_per_donor <- indirect_per_donor[
         rev(seq_len(nrow(indirect_per_donor))), , drop = FALSE
       ]
@@ -950,7 +842,6 @@
     ),
     att         = att,
     per_period  = per_period,
-    # Indirect effect blocks: NULL when no rho is in use.
     indirect_per_period = indirect_per_period_avg,
     indirect_per_donor  = indirect_per_donor,
     indirect_avg        = indirect_avg,
@@ -968,7 +859,6 @@
 }
 
 # Print nascSynth summary objects
-
 print.summary.nascSynth <- function(x, digits = 3, ...) {
 
   h <- x$header
@@ -991,7 +881,7 @@ print.summary.nascSynth <- function(x, digits = 3, ...) {
   ci_lo <- sprintf("l-%g%% CrI", ci_pct)
   ci_hi <- sprintf("u-%g%% CrI", ci_pct)
 
-  # Per-period TE (direct effect)
+  # Per-period direct TE
   has_indirect <- !is.null(x$indirect_per_period)
   cat(if (has_indirect) "Per-period Direct Treatment Effect\n" else "Per-period Treatment Effect\n")
   pp <- x$per_period
@@ -1013,7 +903,7 @@ print.summary.nascSynth <- function(x, digits = 3, ...) {
   print(pp_print, row.names = FALSE, right = TRUE)
   cat("\n")
 
-  # ATT (direct)
+  # direct ATT
   att <- x$att
   att_p_dir <- if (att["mean"] >= 0) att["p_pos"] else 1 - att["p_pos"]
   cat(if (has_indirect) "Average direct Treatment Effect \n" else "Average Treatment Effect\n")
@@ -1035,18 +925,6 @@ print.summary.nascSynth <- function(x, digits = 3, ...) {
   print(att_print, row.names = FALSE, right = TRUE)
   cat("\n")
 
-  # ----------------------------------------------------------------
-  # Indirect (spillover) effects (Proposition 6.2).
-  #
-  # Three blocks, all gated on x$indirect_per_period being non-NULL
-  # (which itself is gated on uses_rho = TRUE in .nasc_summary_stats):
-  #   1. Per-period average spillover -- (1/J) sum_i delta_{i,t}, the
-  #      "typical donor's" spillover at each post-period t.
-  #   2. Average indirect effect      -- average of the per-period
-  #      donor-average across post-periods. Spillover analog of ATT.
-  #   3. Per-donor average spillover  -- every donor in the pool, sorted
-  #      by descending unit index in the canonical donor ordering.
-  # ----------------------------------------------------------------
   if (!is.null(x$indirect_per_period)) {
     ip <- x$indirect_per_period
 
@@ -1111,9 +989,6 @@ print.summary.nascSynth <- function(x, digits = 3, ...) {
     names(pd_print)[3] <- "Est.Error"
     names(pd_print)[4] <- ci_lo
     names(pd_print)[5] <- ci_hi
-    # max = .Machine$integer.max disables the row-count truncation
-    # print.data.frame() applies to long frames, so every donor is
-    # actually rendered even when the donor pool is large.
     print(pd_print, row.names = FALSE, right = TRUE, max = .Machine$integer.max)
     cat("\n")
   }
@@ -1170,8 +1045,7 @@ print.summary.nascSynth <- function(x, digits = 3, ...) {
   names(w_print)[3] <- "Est.Error"
   names(w_print)[4] <- ci_lo
   names(w_print)[5] <- ci_hi
-  # See note above on max = .Machine$integer.max -- bypasses
-  # print.data.frame()'s default row-count truncation.
+
   print(w_print, row.names = FALSE, right = TRUE, max = .Machine$integer.max)
   cat("\n")
 
@@ -1233,18 +1107,13 @@ print.summary.nascSynth <- function(x, digits = 3, ...) {
 }
 
 # Summary method for nascSynth objects
-
 summary.nascSynth <- function(object, ...) {
   invisible(object$summary(...))
 }
 
 
 
-# ----------------------------------------------------------------------------
-# Internal: pull what we need out of a fitted nascSynth object and rebuild
-# the posterior draws of s. Returns a list with donor_names, treated_id,
-# w_mat (draws x J), s_mat (draws x J), W_full, rhos_used.
-# ----------------------------------------------------------------------------
+# Rebuild posterior draws of contamination vector
 .nasc_contamination_draws <- function(model) {
 
   if (!inherits(model, "nascSynth")) {
@@ -1266,10 +1135,6 @@ summary.nascSynth <- function(object, ...) {
     stop("Posterior draws of donor weights 'w' are missing from the fit.")
   }
 
-  # Canonical donor ordering: exactly what Stan saw at fit time. Stored on
-  # private state by $fit() so post-hoc helpers don't have to re-derive it
-  # (and get it wrong by using factor-level order instead of column order
-  # from pivot_wider).
   treated_id <- as.character(priv$treated_ids)
   donor_ids  <- priv$donor_ids
   if (is.null(donor_ids)) {
@@ -1286,8 +1151,6 @@ summary.nascSynth <- function(object, ...) {
   }
   colnames(w_mat) <- donor_ids
 
-  # Reorder W to match Stan's ordering exactly: donors first (in donor_ids
-  # order), treated last. Same logic as in $fit().
   W_full <- as.matrix(priv$W)
   if (is.null(rownames(W_full)) || is.null(colnames(W_full))) {
     all_ids <- levels(priv$data[[rlang::as_name(priv$id)]])
@@ -1296,28 +1159,20 @@ summary.nascSynth <- function(object, ...) {
   W_full <- W_full[c(donor_ids, treated_id), c(donor_ids, treated_id)]
   J     <- length(donor_ids)
   W_J   <- W_full[seq_len(J), seq_len(J), drop = FALSE]
-  # IMPORTANT: w_J1 is the donor-to-treated COLUMN of W (a fixed property
-  # of the network), not the SC simplex weights from Stan. The previous
-  # implementation used w_mat[d, ] here, which produced a meaningless
-  # quantity that happened to have the right shape.
   w_J1  <- as.numeric(W_full[seq_len(J), J + 1])
 
-  # Posterior draws of rho. May come in three shapes depending on the fit
-  # path -- see comments inline.
   rhos    <- priv$y_synth_draws$rhos_used
   n_draws <- nrow(w_mat)
 
   rhos_per_draw <-
     if (length(rhos) == 1L) {
-      # Exogenous rho or single-fit Step 2 with one fixed rho.
+      # Exogenous rho or single-fit module 2 with one fixed rho.
       rep(rhos, n_draws)
     } else if (length(rhos) == n_draws) {
       # One rho per posterior draw.
       rhos
     } else if (n_draws %% length(rhos) == 0L) {
-      # Multi-rho parallel loop: each worker ran with one fixed rho and
-      # contributed n_draws/length(rhos) rows to w_mat. Expand each
-      # worker's rho across its draws.
+      # Multi-rho parallel loop
       draws_per_worker <- n_draws %/% length(rhos)
       rep(rhos, each = draws_per_worker)
     } else {
@@ -1327,20 +1182,12 @@ summary.nascSynth <- function(object, ...) {
       rep(mean(rhos, na.rm = TRUE), n_draws)
     }
 
-  # The contamination vector
-  #   s = rho * (I_J - rho * W_J)^{-1} %*% w_J1
-  # depends ONLY on rho (and on the fixed network terms W_J, w_J1), not on
-  # the SC weights. Solve once per UNIQUE rho rather than once per
-  # posterior draw -- in a multi-rho parallel run with, say, 100 workers
-  # this is two orders of magnitude cheaper than the previous loop.
   I_J         <- diag(J)
   unique_rhos <- unique(rhos_per_draw)
   s_by_rho    <- vapply(unique_rhos, function(r) {
     as.numeric(r * solve(I_J - r * W_J, w_J1))
   }, numeric(J))
   if (J == 1L) {
-    # vapply returns a vector when FUN.VALUE is length-1; promote to
-    # matrix so the lookup below works uniformly.
     s_by_rho <- matrix(s_by_rho, nrow = 1L)
   }
 
@@ -1362,26 +1209,32 @@ summary.nascSynth <- function(object, ...) {
 }
 
 
-# ----------------------------------------------------------------------------
-# Internal: posterior draws of the indirect (spillover) treatment effect.
-#
-# By Proposition 6.2 of the proposal, the per-donor spillover at post-period
-# t is
-#     delta_{i,t}^NASC = s_i / (1 - gamma' s) * tau^SC_{1t}
-#                      = s_i * tau^NASC_{1t},
-# i.e. the same multiplicative factor s applied to the (bias-corrected) direct
-# effect. We reconstruct tau draws here exactly as `.nasc_summary_stats()` and
-# `$tauPlot()` do, then multiply by the per-draw contamination vector s to
-# obtain the [n_draws x T_post x J] tensor of donor-by-period spillover
-# draws.
-#
-# We also return the period-totals delta_t^total = sum_i delta_{i,t} and the
-# per-donor average across post-periods, which are the natural scalars to
-# summarize and plot.
-#
-# Returns NULL when the model is configured without a network (uses_rho =
-# FALSE) -- callers should treat this as "indirect effect not defined".
-# ----------------------------------------------------------------------------
+# Rebuild direct-effect draws from a fitted model
+.indirect_get_tau_draws <- function(model) {
+  priv <- model$.__enclos_env__$private
+  ycf <- priv$y_synth_draws$y_counterfactual
+  bc  <- priv$y_synth_draws$bias_correction
+  if (is.null(bc)) bc <- rep(1, ncol(ycf))
+
+  wide_df <- .makeWide(
+    data      = priv$data,
+    id        = priv$id,
+    time      = priv$time,
+    outcome   = priv$outcome,
+    treatment = priv$treated
+  )
+  post_data <- wide_df |>
+    dplyr::filter(!!priv$time >= priv$intervention)
+  Y1_post <- post_data[[rlang::as_name(priv$outcome)]]
+
+  Y1_mat <- matrix(Y1_post, nrow = nrow(ycf), ncol = length(Y1_post),
+                   byrow = TRUE)
+  bc_mat <- matrix(as.numeric(bc), nrow = nrow(ycf), ncol = ncol(ycf),
+                   byrow = FALSE)
+  (Y1_mat - ycf) * bc_mat
+}
+
+# Posterior draws of the indirect (spillover) effect
 .nasc_indirect_draws <- function(model) {
 
   if (!inherits(model, "nascSynth")) {
@@ -1392,18 +1245,13 @@ summary.nascSynth <- function(object, ...) {
     stop("Run $fit() before requesting indirect-effect draws.")
   }
   if (!isTRUE(priv$uses_rho) || is.null(priv$W)) {
-    # No network in use -> spillover is identically zero. Returning NULL
-    # lets callers cleanly degrade (skip indirect panels in plots, omit
-    # indirect blocks from summary output) rather than emit zero-valued
-    # noise.
     return(NULL)
   }
 
   bits <- .nasc_contamination_draws(model)
-  s_mat       <- bits$s_mat            # [n_draws x J]
+  s_mat       <- bits$s_mat            # n_draws x J
   donor_names <- bits$donor_names
 
-  # Reconstruct tau draws exactly as in .nasc_summary_stats() / tauPlot().
   ycf <- priv$y_synth_draws$y_counterfactual
   bc  <- priv$y_synth_draws$bias_correction
   if (is.null(bc)) bc <- rep(1, ncol(ycf))
@@ -1424,11 +1272,9 @@ summary.nascSynth <- function(object, ...) {
                    byrow = TRUE)
   bc_mat <- matrix(as.numeric(bc), nrow = nrow(ycf), ncol = ncol(ycf),
                    byrow = FALSE)
-  tau_draws <- (Y1_mat - ycf) * bc_mat   # [n_draws x T_post]
+  tau_draws <- (Y1_mat - ycf) * bc_mat   # n_draws x T_post
 
   if (nrow(tau_draws) != nrow(s_mat)) {
-    # Should never happen -- both are aligned on Step-2 posterior draws --
-    # but if it does, surfacing a clear error beats producing nonsense.
     stop("Internal: tau_draws (", nrow(tau_draws),
          " draws) and s_mat (", nrow(s_mat),
          " draws) are misaligned; cannot compute indirect effect.")
@@ -1438,30 +1284,20 @@ summary.nascSynth <- function(object, ...) {
   T_post  <- ncol(tau_draws)
   J       <- ncol(s_mat)
 
-  # 3D tensor: delta[d, t, i] = s_mat[d, i] * tau_draws[d, t].
-  # Implementation: outer product per draw via rep + multiplication; an
-  # explicit loop over draws is simpler and just as fast at the sizes we
-  # see in practice (n_draws on the order of 10^3 - 10^4, T_post and J
-  # both small).
   delta_arr <- array(NA_real_, dim = c(n_draws, T_post, J),
                      dimnames = list(NULL, NULL, donor_names))
   for (d in seq_len(n_draws)) {
     delta_arr[d, , ] <- tcrossprod(tau_draws[d, ], s_mat[d, ])
   }
 
-  # Period totals: sum across donors for each (draw, period). Equivalent
-  # to tau_draws[d, t] * sum(s_mat[d, ]).
   delta_total <- tau_draws * matrix(rowSums(s_mat),
                                     nrow = n_draws, ncol = T_post,
                                     byrow = FALSE)
 
-  # Average across post-periods, draw by draw -> [n_draws x J] matrix of
-  # per-donor "average indirect effect" (analog of ATT for spillovers).
   if (T_post == 1L) {
     avg_per_donor <- matrix(delta_arr[, 1, ], nrow = n_draws, ncol = J,
                             dimnames = list(NULL, donor_names))
   } else {
-    # apply(., c(1, 3), mean) collapses dimension 2 (time).
     avg_per_donor <- apply(delta_arr, c(1L, 3L), mean)
     if (!is.matrix(avg_per_donor)) {
       avg_per_donor <- matrix(avg_per_donor, nrow = n_draws, ncol = J)
@@ -1469,8 +1305,6 @@ summary.nascSynth <- function(object, ...) {
     colnames(avg_per_donor) <- donor_names
   }
 
-  # Average total indirect effect across post-periods (a single scalar
-  # per draw -- the spillover analog of ATT).
   avg_total <- if (T_post == 1L) {
     as.numeric(delta_total[, 1])
   } else {
@@ -1480,9 +1314,9 @@ summary.nascSynth <- function(object, ...) {
   list(
     donor_names    = donor_names,
     time_post      = time_post,
-    delta_arr      = delta_arr,       # [n_draws x T_post x J]
-    delta_total    = delta_total,     # [n_draws x T_post] (sum over donors)
-    avg_per_donor  = avg_per_donor,   # [n_draws x J]
-    avg_total      = avg_total        # [n_draws]
+    delta_arr      = delta_arr,       # n_draws x T_post x J
+    delta_total    = delta_total,     # n_draws x T_post
+    avg_per_donor  = avg_per_donor,   # n_draws x J
+    avg_total      = avg_total        # n_draws
   )
 }

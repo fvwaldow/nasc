@@ -1,4 +1,4 @@
-# Network graph coloured by donor contamination
+# Network graph by donor contamination
 
 contaminationGraph <- function(model,
                                signed         = FALSE,
@@ -23,14 +23,11 @@ contaminationGraph <- function(model,
   s_mean     <- colMeans(s_mat, na.rm = TRUE)
   s_abs_mean <- colMeans(abs(s_mat), na.rm = TRUE)
 
-  # Build graph from the donors+treated block of W.
   A <- W_full
   A[abs(A) < edge_threshold] <- 0
 
   mode <- if (directed) "directed" else "undirected"
   if (!directed) {
-    # Symmetrise via mean of W and W' so an edge survives if it appears
-    # in either direction (row-standardised matrices are rarely symmetric).
     A <- (A + t(A)) / 2
     A[abs(A) < edge_threshold] <- 0
   }
@@ -42,7 +39,6 @@ contaminationGraph <- function(model,
   v_names <- igraph::V(g)$name
   is_treated <- v_names == treated_id
 
-  # Build per-donor contamination value used for colouring.
   v_score <- numeric(length(v_names))
   names(v_score) <- v_names
 
@@ -53,34 +49,20 @@ contaminationGraph <- function(model,
     v_score[!is.na(donor_match)] <- s_abs_mean[donor_match[!is.na(donor_match)]]
   }
 
-  # ----------------------------------------------------------------
-  # Map donor scores to colours. The range is set to the actual
-  # [min, max] of the donor scores (treated unit is excluded -- it is
-  # rendered in a flat grey marker), so the legend interval shrinks
-  # to what is really observed instead of being padded out
-  # symmetrically. For the signed palette we still anchor white at
-  # zero so the diverging colours retain their meaning; the bar
-  # end-points are the true min and max.
-  # ----------------------------------------------------------------
   donor_score  <- v_score[!is_treated]
   finite_donor <- donor_score[is.finite(donor_score)]
   if (signed) {
     v_min <- if (length(finite_donor)) min(finite_donor) else -1
     v_max <- if (length(finite_donor)) max(finite_donor) else  1
-    # Guard against a degenerate constant score (all equal): give the
-    # bar a tiny symmetric spread so colorRampPalette stays well-defined.
     if (!is.finite(v_min) || !is.finite(v_max) || v_min == v_max) {
       eps   <- if (is.finite(v_min) && v_min != 0) abs(v_min) else 1
       v_min <- v_min - eps
       v_max <- v_max + eps
     }
     pal  <- grDevices::colorRampPalette(c("#2166ac", "white", "#b2182b"))(101)
-    # Map score to [-1, 1] with white pinned at 0 on the score scale.
-    # If the observed range is one-sided (e.g. all positive), the bar
-    # simply starts in the white-to-red half -- still honest.
     span <- max(abs(v_min), abs(v_max))
-    z    <- pmax(-1, pmin(1, v_score / span))             # in [-1, 1]
-    idx  <- round((z + 1) / 2 * 100) + 1                  # 1..101
+    z    <- pmax(-1, pmin(1, v_score / span))
+    idx  <- round((z + 1) / 2 * 100) + 1
   } else {
     v_min <- if (length(finite_donor)) min(finite_donor) else 0
     v_max <- if (length(finite_donor)) max(finite_donor) else 1
@@ -94,21 +76,13 @@ contaminationGraph <- function(model,
     idx  <- round(z * 100) + 1
   }
   v_col <- pal[idx]
-  v_col[is_treated] <- "#444444"                         # treated marker
+  v_col[is_treated] <- "#444444"                         # treated unit
 
   v_shape <- ifelse(is_treated, "square", "circle")
   v_size  <- ifelse(is_treated, vertex_size * 1.2, vertex_size)
 
   e_width <- 1
 
-  # ----------------------------------------------------------------
-  # Layout. FR (and most force-directed layouts) use a random initial
-  # configuration, so successive calls yield different pictures. We
-  # materialise the layout matrix here under a fixed seed and then
-  # pass the matrix -- not the function -- to plot.igraph, which
-  # makes the result reproducible across calls. Pass `seed = NULL`
-  # to opt out and get the original stochastic behaviour.
-  # ----------------------------------------------------------------
   if (is.null(layout)) layout <- igraph::layout_with_fr
   if (is.function(layout)) {
     if (!is.null(seed)) {
@@ -129,7 +103,7 @@ contaminationGraph <- function(model,
 
   op <- graphics::par(no.readonly = TRUE)
   on.exit(graphics::par(op), add = TRUE)
-  # Right margin reserved for the colour bar (was 6; the new bar is compact).
+
   graphics::par(mar = c(1, 1, 2, 4))
 
   igraph::plot.igraph(
@@ -149,41 +123,23 @@ contaminationGraph <- function(model,
     main = ""
   )
 
-  # ----------------------------------------------------------------
-  # Compact colour-bar legend, anchored in the upper right margin.
-  #
-  # Geometry choices:
-  #   * The bar sits *outside* the plot area (in the reserved right
-  #     margin) so donor nodes and labels never collide with it.
-  #   * Bar height = 35% of the plot height, top-aligned. This is
-  #     deliberately short -- a tall bar dominates whitespace and
-  #     competes visually with the network.
-  #   * Bar width is set in inches (independent of x-coordinate
-  #     scale, which igraph rescales unpredictably).
-  # ----------------------------------------------------------------
   usr <- graphics::par("usr")
-  pin <- graphics::par("pin")          # plot region in inches
-  cxy <- graphics::par("cxy")          # one character cell in usr units
+  pin <- graphics::par("pin")
+  cxy <- graphics::par("cxy")
 
-  # Convert "0.18 inch" bar width into usr x-units.
   bar_width_in <- 0.18
   ux_per_in    <- (usr[2] - usr[1]) / pin[1]
   bar_w        <- bar_width_in * ux_per_in
 
-  # Place bar just outside the right edge, with a small gap.
   gap   <- 0.5 * cxy[1]
   xl    <- usr[2] + gap
   xr    <- xl + bar_w
 
-  # Vertical: 35% of plot height, anchored 5% below the top.
   bar_h_frac <- 0.35
   top_pad    <- 0.05
   yt <- usr[4] - top_pad * (usr[4] - usr[3])
   yb_bot <- yt - bar_h_frac * (usr[4] - usr[3])
-  # Slice the palette to the [v_min, v_max] sub-range. For the signed
-  # case the palette is parameterised on [-span, span] with white at
-  # zero, so we map [v_min, v_max] into palette indices accordingly.
-  # For the unsigned case the palette already spans [v_min, v_max].
+
   if (signed) {
     lo_frac <- (v_min / span + 1) / 2
     hi_frac <- (v_max / span + 1) / 2
@@ -201,10 +157,6 @@ contaminationGraph <- function(model,
   graphics::rect(xl, yb_bot, xr, yt,
                  col = NA, border = "gray40", xpd = TRUE)
 
-  # Tick labels: bottom = observed min, top = observed max, middle =
-  # midpoint of the observed range (or zero for the signed case when
-  # zero falls inside the range, which keeps the diverging anchor
-  # legible).
   if (signed && v_min < 0 && v_max > 0) {
     mid_val <- 0
     mid_at  <- yb_bot + (0 - v_min) / (v_max - v_min) * (yt - yb_bot)
@@ -217,7 +169,6 @@ contaminationGraph <- function(model,
   graphics::text(xr, lab_at, labels = lab_txt,
                  pos = 4, cex = 0.7, xpd = TRUE)
 
-  # Title above the bar.
   graphics::text(mean(c(xl, xr)), yt,
                  labels = if (signed) "s" else "|s|",
                  pos = 3, cex = 0.85, xpd = TRUE)
@@ -231,7 +182,8 @@ contaminationGraph <- function(model,
 }
 
 
-# Network graph coloured by direct and indirect treatment effects
+
+# Network graph by direct and indirect treatment effects
 
 effectGraph <- function(model,
                         signed         = TRUE,
@@ -260,13 +212,6 @@ effectGraph <- function(model,
     is.null(seed) || (is.numeric(seed) && length(seed) == 1L)
   )
 
-  # ----------------------------------------------------------------
-  # The network and donor labels still come from the contamination
-  # helper. We allow uses_rho = FALSE here (unlike the previous
-  # spillover-only graph): if there is no network the treated node
-  # still carries the ATT, which is informative on its own. We just
-  # warn so the caller knows donors will all be zero.
-  # ----------------------------------------------------------------
   bits        <- tryCatch(.nasc_contamination_draws(model),
                           error = function(e) NULL)
   if (is.null(bits)) {
@@ -280,9 +225,7 @@ effectGraph <- function(model,
   treated_id  <- bits$treated_id
   W_full      <- bits$W_full
 
-  # Per-donor average indirect effect: zero everywhere when uses_rho is
-  # FALSE (spillover is identically zero by construction). Otherwise
-  # pull from the indirect-effect helper.
+  # Per-donor average indirect effect
   ind <- .nasc_indirect_draws(model)
   if (is.null(ind)) {
     delta_mean     <- stats::setNames(numeric(length(donor_names)), donor_names)
@@ -296,13 +239,9 @@ effectGraph <- function(model,
     names(delta_abs_mean) <- donor_names
   }
 
-  # Treated-unit effect: posterior-mean ATT (direct effect averaged
-  # over post-periods).
+  # Treated-unit effect:
   att_mean <- mean(rowMeans(.indirect_get_tau_draws(model)), na.rm = TRUE)
 
-  # ----------------------------------------------------------------
-  # Build graph (same logic as contaminationPlot for consistency).
-  # ----------------------------------------------------------------
   A <- W_full
   A[abs(A) < edge_threshold] <- 0
 
@@ -319,10 +258,6 @@ effectGraph <- function(model,
   v_names    <- igraph::V(g)$name
   is_treated <- v_names == treated_id
 
-  # ----------------------------------------------------------------
-  # Per-node colouring score: signed effect or |effect|. Treated node
-  # gets the ATT; donors get delta_mean (or its absolute value).
-  # ----------------------------------------------------------------
   v_score <- numeric(length(v_names))
   names(v_score) <- v_names
   donor_match <- match(v_names, donor_names)
@@ -335,29 +270,17 @@ effectGraph <- function(model,
     v_score[is_treated] <- abs(att_mean)
   }
 
-  # ----------------------------------------------------------------
-  # Single shared palette covering ALL nodes (donors + treated). The
-  # range is set to the actual [min, max] of the plotted scores, so
-  # the legend interval shrinks to what is really observed instead
-  # of being padded out symmetrically. For the signed palette we
-  # still anchor white at zero (otherwise the diverging colours lose
-  # their meaning), but the bar end-points are the true min and max.
-  # ----------------------------------------------------------------
   finite_score <- v_score[is.finite(v_score)]
   if (signed) {
     v_min <- if (length(finite_score)) min(finite_score) else -1
     v_max <- if (length(finite_score)) max(finite_score) else  1
-    # Guard against a degenerate constant score (all equal): give the
-    # bar a tiny symmetric spread so colorRampPalette stays well-defined.
     if (!is.finite(v_min) || !is.finite(v_max) || v_min == v_max) {
       eps   <- if (is.finite(v_min) && v_min != 0) abs(v_min) else 1
       v_min <- v_min - eps
       v_max <- v_max + eps
     }
     pal <- grDevices::colorRampPalette(c("#2166ac", "white", "#b2182b"))(101)
-    # Map score to [0, 1] with white pinned at 0 on the score scale.
-    # If the observed range is one-sided (e.g. all positive), the bar
-    # simply starts in the white-to-red half -- still honest.
+
     span <- max(abs(v_min), abs(v_max))
     z    <- pmax(-1, pmin(1, v_score / span))
     idx  <- round((z + 1) / 2 * 100) + 1
@@ -375,12 +298,9 @@ effectGraph <- function(model,
   }
   v_col <- pal[idx]
 
-  # Treated node still distinguished by shape (square) and size (1.2x);
-  # the colour now reflects the ATT rather than the grey-marker hack.
   v_shape <- ifelse(is_treated, "square", "circle")
   v_size  <- ifelse(is_treated, vertex_size * 1.2, vertex_size)
 
-  # Optional numeric annotations on node labels.
   v_label <- v_names
   if (isTRUE(show_values)) {
     fmt <- function(x) formatC(x, digits = digits, format = "g")
@@ -393,14 +313,6 @@ effectGraph <- function(model,
 
   e_width <- 1
 
-  # ----------------------------------------------------------------
-  # Layout. FR (and most force-directed layouts) use a random initial
-  # configuration, so successive calls yield different pictures. We
-  # materialise the layout matrix here under a fixed seed and then
-  # pass the matrix -- not the function -- to plot.igraph, which
-  # makes the result reproducible across calls. Pass `seed = NULL`
-  # to opt out and get the original stochastic behaviour.
-  # ----------------------------------------------------------------
   if (is.null(layout)) layout <- igraph::layout_with_fr
   if (is.function(layout)) {
     if (!is.null(seed)) {
@@ -440,13 +352,6 @@ effectGraph <- function(model,
     main = ""
   )
 
-  # ----------------------------------------------------------------
-  # Compact colour-bar legend (geometry matches contaminationPlot()
-  # so the two figures align side by side). The bar now covers only
-  # the slice of the palette that lies between the observed min and
-  # max scores -- i.e. it shrinks to the data, instead of running
-  # the full -rng..+rng span.
-  # ----------------------------------------------------------------
   usr <- graphics::par("usr")
   pin <- graphics::par("pin")
   cxy <- graphics::par("cxy")
@@ -464,10 +369,6 @@ effectGraph <- function(model,
   yt <- usr[4] - top_pad * (usr[4] - usr[3])
   yb_bot <- yt - bar_h_frac * (usr[4] - usr[3])
 
-  # Slice the palette to the [v_min, v_max] sub-range. For the signed
-  # case the palette is parameterised on [-span, span] with white at
-  # zero, so we map [v_min, v_max] into palette indices accordingly.
-  # For the unsigned case the palette already spans [v_min, v_max].
   if (signed) {
     lo_frac <- (v_min / span + 1) / 2
     hi_frac <- (v_max / span + 1) / 2
@@ -485,10 +386,6 @@ effectGraph <- function(model,
   graphics::rect(xl, yb_bot, xr, yt,
                  col = NA, border = "gray40", xpd = TRUE)
 
-  # Tick labels: bottom = observed min, top = observed max, middle =
-  # midpoint of the observed range (or zero for the signed case when
-  # zero falls inside the range, which keeps the diverging anchor
-  # legible).
   if (signed && v_min < 0 && v_max > 0) {
     mid_val <- 0
     mid_at  <- yb_bot + (0 - v_min) / (v_max - v_min) * (yt - yb_bot)
@@ -501,9 +398,6 @@ effectGraph <- function(model,
   graphics::text(xr, lab_at, labels = lab_txt,
                  pos = 4, cex = 0.7, xpd = TRUE)
 
-  # Title above the bar: tau-bar marks "average treatment effect"
-  # (ATT for the treated unit, delta-bar for donors -- both share
-  # the scale so a single label covers them).
   graphics::text(mean(c(xl, xr)), yt,
                  labels = if (signed)
                    expression(bar(tau))
@@ -511,121 +405,11 @@ effectGraph <- function(model,
                    expression(bar("|") * tau * bar("|")),
                  pos = 3, cex = 0.95, xpd = TRUE)
 
-  # Return tibble: one row per node, donors first then treated. The
-  # `effect_mean` column carries delta-bar for donors and ATT for the
-  # treated unit -- exactly the quantity plotted.
   out <- tibble::tibble(
     node            = c(donor_names, treated_id),
     effect_mean     = c(delta_mean,     att_mean),
     abs_effect_mean = c(delta_abs_mean, abs(att_mean)),
     is_treated      = c(rep(FALSE, length(donor_names)), TRUE)
   )
-  invisible(out)
-}
-
-
-# ----------------------------------------------------------------------------
-# Internal: rebuild tau (direct-effect) draws from a fitted nascSynth.
-#
-# Used by effectGraph() to surface the ATT as the treated-unit colour
-# and annotation. The same reconstruction is implemented inline in
-# $tauPlot(), $attPlot(), $effectPlot() and .nasc_indirect_draws();
-# centralizing it here would be a good follow-up refactor but is out
-# of scope for this patch.
-# ----------------------------------------------------------------------------
-.indirect_get_tau_draws <- function(model) {
-  priv <- model$.__enclos_env__$private
-  ycf <- priv$y_synth_draws$y_counterfactual
-  bc  <- priv$y_synth_draws$bias_correction
-  if (is.null(bc)) bc <- rep(1, ncol(ycf))
-
-  wide_df <- .makeWide(
-    data      = priv$data,
-    id        = priv$id,
-    time      = priv$time,
-    outcome   = priv$outcome,
-    treatment = priv$treated
-  )
-  post_data <- wide_df |>
-    dplyr::filter(!!priv$time >= priv$intervention)
-  Y1_post <- post_data[[rlang::as_name(priv$outcome)]]
-
-  Y1_mat <- matrix(Y1_post, nrow = nrow(ycf), ncol = length(Y1_post),
-                   byrow = TRUE)
-  bc_mat <- matrix(as.numeric(bc), nrow = nrow(ycf), ncol = ncol(ycf),
-                   byrow = FALSE)
-  (Y1_mat - ycf) * bc_mat
-}
-
-
-# Mean contamination vs mean weight scatter plot
-
-contaminationScatter <- function(model,
-                                 signed = FALSE,
-                                 label  = TRUE,
-                                 top_n  = 10L) {
-
-  bits        <- .nasc_contamination_draws(model)
-  donor_names <- bits$donor_names
-  w_mat       <- bits$w_mat
-  s_mat       <- bits$s_mat
-
-  w_mean     <- colMeans(w_mat, na.rm = TRUE)
-  s_mean     <- colMeans(s_mat, na.rm = TRUE)
-  s_abs_mean <- colMeans(abs(s_mat), na.rm = TRUE)
-
-  contrib <- w_mean * abs(s_mean)
-  ord <- order(contrib, decreasing = TRUE)
-
-  out <- tibble::tibble(
-    donor      = donor_names,
-    w_mean     = w_mean,
-    s_mean     = s_mean,
-    abs_s_mean = s_abs_mean,
-    contrib    = contrib
-  )[ord, ]
-
-  x_vals <- if (signed) s_mean else s_abs_mean
-  y_vals <- w_mean
-
-  op <- graphics::par(no.readonly = TRUE)
-  on.exit(graphics::par(op))
-  graphics::par(mar = c(4, 5, 2, 1), bty = "l")
-
-  xlab <- if (signed) expression(bar(s)[j]) else expression(bar("|s|")[j])
-  ylab <- expression(bar(w)[j])
-
-  plot(x_vals, y_vals, type = "n",
-       xlab = xlab, ylab = ylab,
-       main = "")
-  graphics::grid(lty = "dotted", col = "gray80")
-  if (signed) graphics::abline(v = 0, lty = 2, col = "gray50")
-  graphics::abline(h = 0, lty = 2, col = "gray50")
-
-  graphics::points(x_vals, y_vals,
-                   pch = 1, col = "gray30", cex = 1.4, lwd = 1.2)
-
-  # Label every marker uniformly in normal weight.
-  # To reduce overlap without adding a dependency on
-  # ggrepel, points in the upper half of the y-range are labelled below
-  # the marker (pos = 1) and points in the lower half above (pos = 3).
-  if (isTRUE(label)) {
-    n_donor <- length(donor_names)
-    if (n_donor > 0L) {
-
-      # Stagger above/below by y-position to spread labels vertically.
-      y_mid <- mean(range(y_vals, na.rm = TRUE))
-      pos   <- ifelse(y_vals >= y_mid, 1L, 3L)
-
-      graphics::text(x_vals, y_vals,
-                     labels = donor_names,
-                     pos    = pos,
-                     cex    = 0.75, # Uniform size for all labels
-                     font   = 1L,   # Uniform normal weight for all labels
-                     offset = 0.4,
-                     xpd    = TRUE)
-    }
-  }
-
   invisible(out)
 }

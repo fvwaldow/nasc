@@ -31,7 +31,9 @@ nascSynth <- R6::R6Class(
     predictors_op = NULL,
     special_predictors = NULL,
     time_predictors_prior = NULL,
-    predictor_labels = NULL
+    predictor_labels = NULL,
+    rho_covariates = NULL,
+    rho_time_window = NULL
   ),
   active = list(
     plotData = function() { return(private$plot_data) },
@@ -40,8 +42,7 @@ nascSynth <- R6::R6Class(
   public = list(
 
 
-    # Create a new nascSynth object.
-
+    # nascSynth object.
     initialize = function(data, time, id, treated, outcome, ci_width = 0.75,
                           covariates = NULL,
                           W = NULL, spatial_model = "none",
@@ -51,7 +52,9 @@ nascSynth <- R6::R6Class(
                           predictor_weights = NULL,
                           predictors.op = "mean",
                           special.predictors = NULL,
-                          time.predictors.prior = NULL) {
+                          time.predictors.prior = NULL,
+                          rho.covariates = NULL,
+                          rho.time.window = NULL) {
 
       stopifnot(ci_width > 0 & ci_width < 1)
 
@@ -118,7 +121,7 @@ nascSynth <- R6::R6Class(
       private$ci_width        <- ci_width
       private$covariates      <- covariates
 
-      # ---- predictors.op / special.predictors / time.predictors.prior ----
+      # predictors.op / special.predictors / time.predictors.prior (module 2)
       if (!is.character(predictors.op) || length(predictors.op) != 1L ||
           is.na(predictors.op) || !nzchar(predictors.op)) {
         stop("'predictors.op' must be a single non-empty character string ",
@@ -158,9 +161,52 @@ nascSynth <- R6::R6Class(
       private$special_predictors    <- special.predictors
       private$time_predictors_prior <- time.predictors.prior
 
-      # predictor_weights: only shape-agnostic checks here. The
-      # length/name match against the final predictor row labels happens in
-      # $fit() once .build_predictor_matrix() has run.
+      # rho.covariates / rho.time.window (module 1 only)
+      if (!is.null(rho.covariates)) {
+        if (!is.character(rho.covariates) || anyNA(rho.covariates) ||
+            !all(nzchar(rho.covariates))) {
+          stop("'rho.covariates' must be a character vector of covariate ",
+               "column names (no NA / empty strings).")
+        }
+        if (is.null(covariates)) {
+          stop("'rho.covariates' was supplied but 'covariates' is NULL; ",
+               "there is no covariate panel to select from.")
+        }
+        avail_cov <- setdiff(
+          names(covariates),
+          c(rlang::as_name(private$time), rlang::as_name(private$id))
+        )
+        missing_cov <- setdiff(rho.covariates, avail_cov)
+        if (length(missing_cov) > 0L) {
+          stop("'rho.covariates' names not found in the covariate panel: ",
+               paste(missing_cov, collapse = ", "), ".")
+        }
+        if (anyDuplicated(rho.covariates)) {
+          stop("'rho.covariates' contains duplicate names.")
+        }
+      }
+
+      if (!is.null(rho.time.window)) {
+        if (!is.numeric(rho.time.window) || length(rho.time.window) < 1L ||
+            anyNA(rho.time.window)) {
+          stop("'rho.time.window' must be a non-empty numeric vector ",
+               "without NAs.")
+        }
+        rho.time.window <- sort(unique(rho.time.window))
+      }
+
+      if ((!is.null(rho.covariates) || !is.null(rho.time.window)) &&
+          !(bias_correction || nasc_penalty) ||
+          (!is.null(rho.covariates) || !is.null(rho.time.window)) &&
+          (!is.null(rho) || !spatial_model %in% c("SAR", "SDM"))) {
+        message("nascSynth: 'rho.covariates'/'rho.time.window' are only used ",
+                "when Step 1 estimates rho (spatial_model 'SAR'/'SDM' with no ",
+                "exogenous rho); they will be ignored for this configuration.")
+      }
+
+      private$rho_covariates  <- rho.covariates
+      private$rho_time_window <- rho.time.window
+
       if (!is.null(predictor_weights)) {
         if (is.null(covariates) && is.null(special.predictors)) {
           stop("predictor_weights was supplied but neither 'covariates' nor ",
@@ -270,12 +316,11 @@ nascSynth <- R6::R6Class(
         } else {
           NULL
         },
-        step2 = stanmodels$stan_2_NASC   # unified model; use_penalty flag selects path
+        step2 = stanmodels$stan_2_NASC
       )
     },
 
-    # Fit the Stan model via MCMC
-
+    # Fit the Stan model via HMC
     fit = function(n_samples = 100,
                    n_samples_cap = 500L,
                    n_samples_min = 30L,
@@ -359,8 +404,6 @@ nascSynth <- R6::R6Class(
         )
 
         if (length(pred_mat$names) > 0L) {
-          # Append predictor rows to the outcome-pre-period matching matrix.
-          # The donor-column ordering of pred_mat$X0 already matches X.
           X  <- rbind(as.data.frame(X),
                       as.data.frame(pred_mat$X0,
                                     check.names = FALSE,
@@ -399,24 +442,65 @@ nascSynth <- R6::R6Class(
           lambda_W_re <- Re(ev)
           lambda_W_im <- Im(ev)
 
+          # module 1 covariate selection
           cov_names <- if (is.null(private$covariates)) {
             character(0)
           } else {
-            setdiff(
+            all_cov <- setdiff(
               names(private$covariates),
               c(rlang::as_name(private$time), rlang::as_name(private$id))
             )
+            if (is.null(private$rho_covariates)) {
+              all_cov
+            } else {
+              private$rho_covariates[private$rho_covariates %in% all_cov]
+            }
           }
 
-          T0_n       <- nrow(pre_data)
+          # module 1 time window
+          pre_times <- sort(unique(pre_data |> dplyr::pull(!!private$time)))
+          if (is.null(private$rho_time_window)) {
+            step1_times <- pre_times
+          } else {
+            req <- private$rho_time_window
+            post_req <- req[req >= private$intervention]
+            if (length(post_req) > 0L) {
+              warning("'rho.time.window' includes post-intervention period(s): ",
+                      paste(post_req, collapse = ", "),
+                      "; these are dropped from Step-1 rho estimation.")
+            }
+            not_found <- setdiff(req[req < private$intervention], pre_times)
+            if (length(not_found) > 0L) {
+              warning("'rho.time.window' includes period(s) absent from the ",
+                      "pre-treatment panel: ",
+                      paste(not_found, collapse = ", "), "; they are ignored.")
+            }
+            step1_times <- sort(intersect(req, pre_times))
+            if (length(step1_times) == 0L) {
+              stop("'rho.time.window' selects no pre-treatment periods for ",
+                   "Step-1 rho estimation.")
+            }
+          }
+
+          T0_n       <- length(step1_times)              # module 1 periods
           unit_order <- c(donor_ids, treated_id)
           N_units    <- length(unit_order)
           J_n        <- length(donor_ids)
-          treated_i  <- N_units                          # treated is last in unit_order
+          treated_i  <- N_units                          # treated is last entry in unit_order
+
+          if (!is.null(private$rho_covariates) ||
+              !is.null(private$rho_time_window)) {
+            message(sprintf(
+              "Step 1: estimating rho from %d covariate(s) (%s) over %d pre-period(s).",
+              length(cov_names),
+              if (length(cov_names) > 0L) paste(cov_names, collapse = ", ") else "none",
+              T0_n
+            ))
+          }
 
           if (length(cov_names) > 0L) {
             cov_pre <- private$covariates |>
-              dplyr::filter(!!private$time < private$intervention)
+              dplyr::filter(!!private$time %in% step1_times)
 
             expected_rows <- N_units * T0_n
             if (nrow(cov_pre) != expected_rows) {
@@ -481,6 +565,14 @@ nascSynth <- R6::R6Class(
             }
           }
 
+          # module 1 outcome panel
+          Y_panel_step1 <- t(as.matrix(
+            pre_data |>
+              dplyr::filter(!!private$time %in% step1_times) |>
+              dplyr::select(dplyr::all_of(donor_ids), !!private$outcome)
+          ))
+
+          # module 2 outcome panel
           Y_panel <- t(as.matrix(
             pre_data |> dplyr::select(dplyr::all_of(donor_ids), !!private$outcome)
           ))
@@ -491,14 +583,13 @@ nascSynth <- R6::R6Class(
         }
       }
 
-      # Always build Y_panel for the unified step-2 Stan model.
       if (is.null(Y_panel)) {
         Y_panel <- t(as.matrix(
           pre_data |> dplyr::select(dplyr::all_of(donor_ids), !!private$outcome)
         ))
       }
 
-      # STEP 1 (only if needed)
+      # Module 1
       sampled_rhos <- if (private$uses_rho) {
         if (!is.null(private$rho_exogenous)) {
           private$rho_exogenous
@@ -507,10 +598,10 @@ nascSynth <- R6::R6Class(
           step1_data <- list(
             K_pred   = K_pred,
             J        = length(donor_ids),
-            T0       = nrow(pre_data),
-            X1       = X1_arr,         # T0 x K_pred       -> array[T0] vector[K_pred]
-            X0       = X0_arr,         # T0 x K_pred x J   -> array[T0] matrix[K_pred, J]
-            Y_panel  = Y_panel,        # (J+1) x T0
+            T0       = T0_n,
+            X1       = X1_arr,         # T0 x K_pred
+            X0       = X0_arr,         # T0 x K_pred x J
+            Y_panel  = Y_panel_step1,  # (J+1) x T0
             W        = W_full,
             lambda_W_re = lambda_W_re,
             lambda_W_im = lambda_W_im
@@ -579,7 +670,7 @@ nascSynth <- R6::R6Class(
         NA_real_
       }
 
-      # STEP 2
+      # Module 2
       if (private$nasc_penalty) {
         if (!is.null(private$covariates) ||
             !is.null(private$special_predictors)) {
@@ -659,18 +750,11 @@ nascSynth <- R6::R6Class(
         )
 
       } else {
-        # No-penalty path: use the same unified Stan model (stan_2_NASC) with
-        # use_penalty = 0L.  The data interface is the same panel format used
-        # by the penalty path; covariate rows that were previously appended to
-        # X/X1 by R are now passed as separate X_cov0/X_cov1 inputs so that
-        # Stan can standardize them independently of the outcome rows.
-
         J_n       <- length(donor_ids)
         N_total   <- nrow(X)
-        N_outcome <- n_pre_real     # = T0: outcome rows only
+        N_outcome <- n_pre_real
         N_aug     <- N_total - N_outcome
 
-        # Extract covariate sub-matrices from the augmented X/X1 (if any).
         if (N_aug > 0L) {
           if (length(v_pred_step2) != N_aug) {
             stop(sprintf(
@@ -679,7 +763,7 @@ nascSynth <- R6::R6Class(
               sprintf("number of augmented matching rows (%d).", N_aug))
           }
           X_cov0_mat_nop <- as.matrix(X[(N_outcome + 1L):N_total, donor_ids,
-                                         drop = FALSE])  # K_cov x J
+                                        drop = FALSE])  # K_cov x J
           X_cov1_vec_nop <- as.numeric(X1[(N_outcome + 1L):length(X1)])
           v_cov_vec_nop  <- v_pred_step2
         } else {
@@ -688,14 +772,11 @@ nascSynth <- R6::R6Class(
           v_cov_vec_nop  <- numeric(0)
         }
 
-        # When bias correction is off we have no meaningful rho, W_J, or w_J1.
-        # Pass rho = 0 and dummy spatial matrices: s = rho*(...)^{-1}*w_J1 = 0
-        # when rho = 0, so bias_correction collapses to 1 regardless of W/w.
         if (private$bias_correction) {
           W_J_nop  <- W_J
           w_J1_nop <- w_J1
         } else {
-          W_J_nop  <- diag(J_n)      # identity: invertible, irrelevant at rho=0
+          W_J_nop  <- diag(J_n)
           w_J1_nop <- rep(0, J_n)
         }
 
@@ -708,7 +789,7 @@ nascSynth <- R6::R6Class(
           T_post              = nrow(X_pred),
           Y0_post             = as.matrix(X_pred[, donor_ids, drop = FALSE]),
           Y1_post             = as.array(as.numeric(
-                                  post_data |> dplyr::pull(!!private$outcome))),
+            post_data |> dplyr::pull(!!private$outcome))),
           use_bias_correction = as.integer(private$bias_correction),
           use_penalty         = 0L,
           K_cov               = N_aug,
@@ -718,7 +799,6 @@ nascSynth <- R6::R6Class(
         )
 
         if (!private$bias_correction) {
-          # Single run: no rho loop needed.
           base_data$rho <- 0
 
           private$fitted <- rstan::sampling(
@@ -782,8 +862,7 @@ nascSynth <- R6::R6Class(
       )
     },
 
-    # Update the credible interval width
-
+    # Update credible interval width
     updateWidth = function(ci_width = 0.75) {
       stopifnot(ci_width > 0, ci_width < 1)
       private$ci_width <- ci_width
@@ -809,8 +888,7 @@ nascSynth <- R6::R6Class(
       )
     },
 
-    # summary of the fit
-
+    # fit summary
     summary = function(ci_width = NULL, print = TRUE) {
       if (is.null(private$y_synth_draws)) {
         stop("Run $fit() before calling summary().")
@@ -856,8 +934,7 @@ nascSynth <- R6::R6Class(
       invisible(out)
     },
 
-    # Draws and summaries of the indirect (spillover) treatment effect
-
+    # summary of the indirect treatment effect
     indirectEffect = function() {
       if (is.null(private$y_synth_draws)) {
         stop("Run $fit() before calling indirectEffect().")
@@ -865,8 +942,7 @@ nascSynth <- R6::R6Class(
       .nasc_indirect_draws(self)
     },
 
-    # Plot of the observed and synthetic-control outcome trajectories
-
+    # Plot of the observed and SC outcome
     syntheticPlot = function() {
       if (is.null(private$plot_data)) {
         stop("Run $fit() before calling syntheticPlot().")
@@ -909,8 +985,7 @@ nascSynth <- R6::R6Class(
       invisible(NULL)
     },
 
-    # Plot pf the estimated direct treatment effect
-
+    # Plot estimated direct treatment effect
     effectPlot = function(indirect = NULL) {
       if (is.null(private$plot_data)) {
         stop("Run $fit() before calling effectPlot().")
@@ -930,8 +1005,7 @@ nascSynth <- R6::R6Class(
       invisible(NULL)
     },
 
-    # Posterior density plots of the main parameters
-
+    # Posterior density plots
     posteriorPlot = function() {
       if (is.null(private$fitted) && is.null(private$y_synth_draws)) {
         stop("Run $fit() before calling posteriorPlot().")
@@ -956,12 +1030,6 @@ nascSynth <- R6::R6Class(
         list()
       }
 
-      # Step 1 reports beta and theta on a standardized internal scale; the
-      # Stan models also export `beta_orig` and `theta_orig`, which undo
-      # the standardization and live on the original (user) scale. Always
-      # display the original-scale draws when they're available, falling
-      # back to the standardized ones only for older fits that pre-date
-      # the back-transform.
       if (!is.null(step1_draws$beta_orig)) {
         step1_draws$beta <- step1_draws$beta_orig
       }
@@ -1028,14 +1096,12 @@ nascSynth <- R6::R6Class(
         }
       }
 
-      # Step-1 sigma is named differently per model: sigma_sar vs sigma_sdm
       if (!is.null(step1_draws$sigma_sar)) {
         add_panel("sigma_step1", step1_draws$sigma_sar)
       } else if (!is.null(step1_draws$sigma_sdm)) {
         add_panel("sigma_step1", step1_draws$sigma_sdm)
       }
 
-      # Step-2 scalars (lambda, sigma_step2, bias_correction)
       if (!is.null(private$y_synth_draws)) {
         if (!is.null(private$y_synth_draws$lambda)) {
           add_panel("lambda", private$y_synth_draws$lambda)
@@ -1074,8 +1140,7 @@ nascSynth <- R6::R6Class(
       invisible(NULL)
     },
 
-    # Posterior density plot of the average treatment effect
-
+    # Posterior density plot of ATE
     attPlot = function(indirect = NULL) {
       if (is.null(private$y_synth_draws)) stop("Run $fit() before calling attPlot.")
 
@@ -1148,8 +1213,7 @@ nascSynth <- R6::R6Class(
       invisible(NULL)
     },
 
-    # Posterior density plots of the period-by-period treatment effects
-
+    # Posterior density plots of TE
     tauPlot = function(indirect = NULL) {
       if (is.null(private$y_synth_draws)) stop("Run $fit() before calling tauPlot.")
 
@@ -1185,19 +1249,19 @@ nascSynth <- R6::R6Class(
         ind <- tryCatch(.nasc_indirect_draws(self), error = function(e) NULL)
         if (!is.null(ind)) {
           J <- length(ind$donor_names)
-          delta_avg_draws <- ind$delta_total / J         # [n_draws x T_post]
+          delta_avg_draws <- ind$delta_total / J         # n_draws x T_post
         } else if (indirect_default) {
           warning("Indirect-effect draws unavailable; drawing direct effect only.")
         }
         if (is.null(delta_avg_draws)) indirect <- FALSE
       }
 
-      # Direct-effect densities (always drawn)
+      # Direct-effect densities
       dens_dir <- lapply(seq_len(n_t),
                          function(i) stats::density(tau_draws[, i], na.rm = TRUE))
       xr_dir <- range(sapply(dens_dir, function(d) d$x))
 
-      # Indirect-effect densities (drawn only if indirect = TRUE)
+      # Indirect-effect densities
       dens_ind <- NULL
       xr_ind   <- NULL
       if (indirect) {
@@ -1261,7 +1325,6 @@ nascSynth <- R6::R6Class(
     },
 
     # Plot of the posterior weight density per donor
-
     weightDraws = function(overlap = 0.5, scale = 1.4, fill_alpha = 0.85) {
       if (is.null(private$fitted)) stop("Run $fit() before calling weightDraws().")
 
@@ -1333,7 +1396,6 @@ nascSynth <- R6::R6Class(
     },
 
     # Plot of the correlations between weights across draws
-
     weightCorr = function() {
       if (is.null(private$fitted)) stop("Run $fit() before calling weightCorr().")
 
