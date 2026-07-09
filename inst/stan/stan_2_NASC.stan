@@ -1,5 +1,4 @@
 // Module 2
-
 data {
   int<lower=0> J;
   int<lower=1> T0;
@@ -13,38 +12,23 @@ data {
   matrix[K_cov, J] X_cov0;
   vector[K_cov] X_cov1;
   vector<lower=0>[K_cov] v_cov;
-
   real<lower=-1, upper=1> rho;
   int<lower=0, upper=1> use_bias_correction;
   int<lower=0, upper=1> use_penalty;
 }
-
 transformed data {
   matrix[J, J] I_J = diag_matrix(rep_vector(1.0, J));
-
-  // standardization
-  vector[T0] y_pre    = to_vector(Y_panel[J + 1, ]);
-  real       mean_y   = mean(y_pre);
-  real       sd_y     = sd(y_pre);
+  vector[T0] y_pre     = to_vector(Y_panel[J + 1, ]);
+  real       mean_y    = mean(y_pre);
+  real       sd_y      = sd(y_pre);
   vector[T0] y_pre_std = (y_pre - mean_y) / sd_y;
 
-  matrix[T0, J] X_pre     = Y_panel[1:J, ]';   // T0 x J
-  matrix[T0, J] X_pre_std;
+  matrix[T0, J]     X_pre = Y_panel[1:J, ]';   // T0 x J
+  matrix[T0, J]     X_pre_std;
   matrix[T_post, J] Y0_post_std;
-
-  vector[J] mean_X;
-  vector[J] sd_X;
-
   for (j in 1:J) {
-    mean_X[j] = mean(X_pre[, j]);
-    sd_X[j]   = sd(X_pre[, j]);
-    if (sd_X[j] > 1e-12) {
-      X_pre_std[, j]   = (X_pre[, j]   - mean_X[j]) / sd_X[j];
-      Y0_post_std[, j] = (Y0_post[, j] - mean_X[j]) / sd_X[j];
-    } else {
-      X_pre_std[, j]   = rep_vector(0.0, T0);
-      Y0_post_std[, j] = rep_vector(0.0, T_post);
-    }
+    X_pre_std[, j]   = (X_pre[, j]   - mean_y) / sd_y;
+    Y0_post_std[, j] = (Y0_post[, j] - mean_y) / sd_y;
   }
 
   matrix[K_cov, J] X_cov0_std;
@@ -61,26 +45,30 @@ transformed data {
     }
   }
 
-  vector[J] s      = rho * mdivide_left(I_J - rho * W_J, w_J1); // contamination vector s
-  vector[J] s_abs  = fabs(s);
-  real n_eff = T0 + sum(v_cov); // rescaled lambda
-}
+  // Contamination vector and rescaled-penalty normalizer.
+  vector[J] s     = rho * mdivide_left(I_J - rho * W_J, w_J1);
+  vector[J] s_abs = fabs(s);
+  real n_eff = T0 + sum(v_cov);
 
+  real sigma_floor = 0.05;
+}
 parameters {
-  simplex[J] w;                  // SC donor weights
-  real<lower=0> sigma_sc;
+  simplex[J]    w;             // SC donor weights
+  real<lower=0> sigma_raw;     // free part of the likelihood SD
   real<lower=0> lambda_tilde;
 }
-
 transformed parameters {
-  real<lower=0> lambda = lambda_tilde * n_eff;
+  // Soft floor
+  real<lower=0> sigma_sc = sqrt(square(sigma_floor) + square(sigma_raw));
+  real<lower=0> lambda   = lambda_tilde * n_eff;
 }
-
 model {
-  sigma_sc     ~ normal(0, 1);
+  sigma_raw    ~ normal(0, 1);       // half-normal (implicit <lower=0>)
   lambda_tilde ~ gamma(2, 1);
+
   if (use_penalty)
     target += -lambda * dot_product(w, s_abs); // nasc penalty
+
   target += normal_lpdf(y_pre_std | X_pre_std * w, sigma_sc); // outcome likelihood
 
   for (k in 1:K_cov) {
@@ -90,25 +78,21 @@ model {
                             sigma_sc / sqrt(v_cov[k]));
   }
 }
-
 generated quantities {
   vector[T0]     y_sim_pre;
   vector[T_post] y_counterfactual;
-
   real wts_dot         = dot_product(w, s);
   real bias_correction = use_bias_correction == 1
                          ? 1.0 / (1.0 - wts_dot)
                          : 1.0;
-
   for (t in 1:T0)
     y_sim_pre[t] = normal_rng(dot_product(X_pre_std[t, ], w), sigma_sc)
                    * sd_y + mean_y;
-
   for (t in 1:T_post)
     y_counterfactual[t] = normal_rng(dot_product(Y0_post_std[t, ], w), sigma_sc)
                           * sd_y + mean_y;
-
   real lambda_out       = lambda;
   real lambda_tilde_out = lambda_tilde;
   real n_eff_out        = n_eff;
+  real sigma_sc_out     = sigma_sc;   // monitor: should sit near sigma_floor
 }
