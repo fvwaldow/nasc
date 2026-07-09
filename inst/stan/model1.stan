@@ -21,23 +21,48 @@ data {
 }
 
 transformed data{
-   // standardize using pre-treatment values
    matrix[N, K] X_std;
    matrix[N_pred, K] X_pred_std;
-   vector[K] mean_X;
-   vector[K] sd_X;
-   real mean_y = mean(y);
-   real sd_y = sd(y);
-   vector[N] y_std = (y - mean_y) / sd_y;
+   vector[N] y_std;
 
-   for (k in 1:K) {
-      mean_X[k] = mean(X[,k]);
-      sd_X[k] = sd(X[,k]);
-      X_std[,k] = (X[,k] - mean_X[k]) / sd_X[k];
-      X_pred_std[,k] = (X_pred[,k] - mean_X[k]) / sd_X[k];
+   // 1. Outcome standardization (bsynth individual-wise)
+   real mean_y = mean(y[1:N_outcome]);
+   real sd_y   = sd(y[1:N_outcome]);
+
+   for (i in 1:N_outcome) {
+      y_std[i] = (y[i] - mean_y) / sd_y;
    }
 
-   vector[J_bc] s_bc;
+   for (k in 1:K) {
+      real mean_X_k = mean(X[1:N_outcome, k]);
+      real sd_X_k   = sd(X[1:N_outcome, k]);
+
+      if (sd_X_k > 1e-12) {
+         X_std[1:N_outcome, k] = (X[1:N_outcome, k] - mean_X_k) / sd_X_k;
+         X_pred_std[, k]       = (X_pred[, k] - mean_X_k) / sd_X_k;
+      } else {
+         X_std[1:N_outcome, k] = rep_vector(0.0, N_outcome);
+         X_pred_std[, k]       = rep_vector(0.0, N_pred);
+      }
+   }
+
+   // 2. Covariate standardization (row-wise across donors, like Model 2)
+   for (aug_idx in (N_outcome + 1):N) {
+      real m_aug = mean(X[aug_idx, ]);
+      real s_aug = sd(X[aug_idx, ]);
+
+      if (s_aug > 1e-12) {
+         X_std[aug_idx, ] = (X[aug_idx, ] - m_aug) / s_aug;
+         y_std[aug_idx]   = (y[aug_idx] - m_aug) / s_aug;
+      } else {
+         X_std[aug_idx, ] = rep_row_vector(0.0, K);
+         y_std[aug_idx]   = 0.0;
+      }
+   }
+
+   // 3. Bias correction vector
+   // Initialized to 0 to prevent uninitialized memory warnings
+   vector[J_bc] s_bc = rep_vector(0.0, J_bc);
    if (use_bias_correction == 1) {
       matrix[J_bc, J_bc] I_J = diag_matrix(rep_vector(1.0, J_bc));
       s_bc = rho_bc * mdivide_left(I_J - rho_bc * W_J, w_J1);
@@ -64,14 +89,15 @@ model {
 }
 
 generated quantities {
-   vector[N] y_sim_pre;
+   // FIX: Only loop up to N_outcome so covariates are not back-transformed
+   vector[N_outcome] y_sim_pre;
    vector[N_pred] y_counterfactual;
 
    real bias_correction = use_bias_correction == 1
                           ? 1.0 / (1.0 - dot_product(w, s_bc))
                           : 1.0;
 
-   for (i in 1:N) {
+   for (i in 1:N_outcome) {
       y_sim_pre[i] = normal_rng(X_std[i,]*w, sigma) * sd_y + mean_y;
    }
    for (j in 1:N_pred) {

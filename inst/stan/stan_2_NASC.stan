@@ -24,17 +24,27 @@ transformed data {
 
   // standardization
   vector[T0] y_pre    = to_vector(Y_panel[J + 1, ]);
-  real        mean_y  = mean(y_pre);
-  real        sd_y    = sd(y_pre);
-  vector[T0]  y_pre_std = (y_pre - mean_y) / sd_y;
+  real       mean_y   = mean(y_pre);
+  real       sd_y     = sd(y_pre);
+  vector[T0] y_pre_std = (y_pre - mean_y) / sd_y;
 
   matrix[T0, J] X_pre     = Y_panel[1:J, ]';   // T0 x J
   matrix[T0, J] X_pre_std;
   matrix[T_post, J] Y0_post_std;
 
+  vector[J] mean_X;
+  vector[J] sd_X;
+
   for (j in 1:J) {
-    X_pre_std[, j]   = (X_pre[, j]   - mean_y) / sd_y;
-    Y0_post_std[, j] = (Y0_post[, j] - mean_y) / sd_y;
+    mean_X[j] = mean(X_pre[, j]);
+    sd_X[j]   = sd(X_pre[, j]);
+    if (sd_X[j] > 1e-12) {
+      X_pre_std[, j]   = (X_pre[, j]   - mean_X[j]) / sd_X[j];
+      Y0_post_std[, j] = (Y0_post[, j] - mean_X[j]) / sd_X[j];
+    } else {
+      X_pre_std[, j]   = rep_vector(0.0, T0);
+      Y0_post_std[, j] = rep_vector(0.0, T_post);
+    }
   }
 
   matrix[K_cov, J] X_cov0_std;
@@ -51,8 +61,8 @@ transformed data {
     }
   }
 
-  vector[J] s     = rho * mdivide_left(I_J - rho * W_J, w_J1); // contamination vector s
-  vector[J] s_abs = fabs(s);
+  vector[J] s      = rho * mdivide_left(I_J - rho * W_J, w_J1); // contamination vector s
+  vector[J] s_abs  = fabs(s);
   real n_eff = T0 + sum(v_cov); // rescaled lambda
 }
 
