@@ -13,7 +13,6 @@ nascPlot <- function(models, show_ci = FALSE) {
 
   intervention_time <- mod1$interventionTime
 
-  # Standardize each model's data
   combined_list <- lapply(names(models), function(m_name) {
     df <- models[[m_name]]$plotData
     if (is.null(df)) {
@@ -30,9 +29,8 @@ nascPlot <- function(models, show_ci = FALSE) {
   n_models <- length(models)
   cols <- grDevices::hcl.colors(max(n_models, 2), palette = "Dark 3")[seq_len(n_models)]
 
-  # ---------------------------------------------------------------
-  # Plot 1: Synthetic vs Observed
-  # ---------------------------------------------------------------
+
+  # Plot Synthetic vs Observed
   obs_df <- combined_list[[1]][, c("time_var", "outcome_var")]
 
   y_vals <- c(obs_df$outcome_var,
@@ -80,9 +78,8 @@ nascPlot <- function(models, show_ci = FALSE) {
                    bg     = grDevices::adjustcolor("white", alpha.f = 0.85),
                    box.col = "gray70")
 
-  # ---------------------------------------------------------------
-  # Plot 2: Direct treatment effect (tau)
-  # ---------------------------------------------------------------
+
+  # Plot Direct treatment effect (tau)
   y_vals2 <- unlist(lapply(combined_list, function(d) d$tau))
   if (isTRUE(show_ci)) {
     y_vals2 <- c(y_vals2,
@@ -122,6 +119,7 @@ nascPlot <- function(models, show_ci = FALSE) {
   invisible(NULL)
 }
 
+
 # Comparison Plot of Posterior Donor-Weight Distributions Across Models
 
 nascWeight <- function(models,
@@ -130,7 +128,6 @@ nascWeight <- function(models,
                        fill_alpha  = 0.45,
                        max_donors  = NULL) {
 
-  # ---- input validation ---------------------------------------------
   if (!is.list(models) || is.null(names(models)) || any(names(models) == "")) {
     stop("'models' must be a named list of fitted nascSynth objects.")
   }
@@ -154,7 +151,6 @@ nascWeight <- function(models,
     max_donors <- as.integer(max_donors)
   }
 
-  # ---- pull each model's draws + donor labels -----------------------
   per_model <- lapply(names(models), function(m_name) {
     mod  <- models[[m_name]]
     priv <- mod$.__enclos_env__$private
@@ -166,7 +162,7 @@ nascWeight <- function(models,
       stop(sprintf("Model '%s' has no posterior draws of donor weights.",
                    m_name))
     }
-    # Canonical donor ordering = colnames(X_pred) at fit time.
+
     donor_ids <- priv$donor_ids
     if (is.null(donor_ids)) {
       treated_id  <- as.character(priv$treated_ids)
@@ -184,13 +180,6 @@ nascWeight <- function(models,
     list(name = m_name, w_mat = w_mat, donors = donor_ids)
   })
 
-  # ---- donor ordering: by donor ID, largest at top ------------------
-  # Donors are listed on the y-axis in the order in which they appear
-  # in the union of model donor pools, sorted so that the largest ID
-  # ends up at the TOP of the plot (highest baseline). When IDs are
-  # numeric (or numeric-as-character, e.g. "1", "2", ..., "20") we
-  # sort numerically so "20" sits above "3"; otherwise we fall back to
-  # lexicographic order on as.character().
   all_donors <- unique(unlist(lapply(per_model, `[[`, "donors")))
 
   num_attempt <- suppressWarnings(as.numeric(all_donors))
@@ -199,17 +188,11 @@ nascWeight <- function(models,
   } else {
     donor_order <- all_donors[order(as.character(all_donors), decreasing = FALSE)]
   }
-
-  # `max_donors` keeps the LARGEST `max_donors` IDs (i.e. drops the
-  # smallest), preserving the "largest at top" intuition.
   if (!is.null(max_donors) && length(donor_order) > max_donors) {
     keep_n <- as.integer(max_donors)
     donor_order <- donor_order[(length(donor_order) - keep_n + 1L):length(donor_order)]
   }
 
-  # Plotting baseline `step * i` with i = 1..n places i = n at the TOP.
-  # `donor_order` is currently ascending, so the last element is the
-  # largest -- exactly the donor we want at i = n. Use it as-is.
   donor_plot <- donor_order
   n_d <- length(donor_plot)
 
@@ -217,9 +200,6 @@ nascWeight <- function(models,
     stop("No donors to plot.")
   }
 
-  # ---- compute densities --------------------------------------------
-  # Index by [donor, model]; entries are NULL where the donor is absent
-  # from a given model.
   n_m <- length(per_model)
   dens_grid <- vector("list", n_d)
   for (i in seq_len(n_d)) {
@@ -233,7 +213,6 @@ nascWeight <- function(models,
     })
   }
 
-  # Global x-range and per-row max y for a coherent layout.
   all_x <- unlist(lapply(dens_grid, function(row) {
     unlist(lapply(row, function(d) if (!is.null(d)) d$x else NULL))
   }))
@@ -245,17 +224,14 @@ nascWeight <- function(models,
   }, numeric(1)))
   if (!is.finite(max_y) || max_y <= 0) max_y <- 1
 
-  # ---- layout geometry (same idea as $weightDraws()) ----------------
   ridge_h  <- scale * max_y
   step     <- ridge_h * (1 - overlap)
   ylim_top <- step * n_d + ridge_h * 1.05
   ylim_bot <- -ridge_h * 0.05
 
-  # ---- colours: same palette as nascPlot() --------------------------
   cols <- grDevices::hcl.colors(max(n_m, 2), palette = "Dark 3")[seq_len(n_m)]
   fills <- grDevices::adjustcolor(cols, alpha.f = fill_alpha)
 
-  # ---- draw -----------------------------------------------------------
   op <- graphics::par(no.readonly = TRUE)
   on.exit(graphics::par(op))
   graphics::par(mar = c(4, 6, 2, 1), bty = "l")
@@ -266,9 +242,6 @@ nascWeight <- function(models,
        yaxt = "n")
   graphics::axis(2, at = step * seq_len(n_d), labels = donor_plot, las = 1)
 
-  # Top-down draw order so the bottommost (heaviest) donor's ridge is
-  # in front. Within a row, draw all models in the order given so the
-  # legend's color order is preserved visually.
   for (i in seq(n_d, 1L, by = -1L)) {
     baseline <- step * i
     graphics::segments(x_range[1], baseline, x_range[2], baseline,
@@ -295,9 +268,6 @@ nascWeight <- function(models,
                    box.col = "gray70",
                    cex     = 0.9)
 
-  # ---- summary tibble for programmatic use ---------------------------
-  # Order rows from largest ID (top of plot) to smallest, matching the
-  # visual order so the tibble reads naturally alongside the figure.
   summary_rows <- list()
   for (donor in rev(donor_order)) {
     for (pm in per_model) {
