@@ -1,4 +1,17 @@
 // Module 2
+functions {
+  // log Z(lambda) of the ETDir prior by Hermite-Genocchi/Opitz (required for numerical stability within Stan)
+  real log_Z_etdir(real lambda, vector s_abs, int J) {
+    real s_min = min(s_abs);
+    matrix[J, J] B = rep_matrix(0.0, J, J);
+    for (j in 1:J) {
+      B[j, j] = -lambda * (s_abs[j] - s_min);
+      if (j < J)
+        B[j, j + 1] = 1.0;
+    }
+    return lgamma(J) - lambda * s_min + log(matrix_exp(B)[1, J]);
+  }
+}
 data {
   int<lower=0> J;
   int<lower=1> T0;
@@ -67,7 +80,8 @@ model {
   lambda_tilde ~ gamma(2, 1);
 
   if (use_penalty)
-    target += -lambda * dot_product(w, s_abs); // nasc penalty
+    target += -lambda * dot_product(w, s_abs)
+              - log_Z_etdir(lambda, s_abs, J); // nasc penalty (proper ETDir)
 
   target += normal_lpdf(y_pre_std | X_pre_std * w, sigma_sc); // outcome likelihood
 
@@ -94,5 +108,5 @@ generated quantities {
   real lambda_out       = lambda;
   real lambda_tilde_out = lambda_tilde;
   real n_eff_out        = n_eff;
-  real sigma_sc_out     = sigma_sc;   // monitor: should sit near sigma_floor
+  real sigma_sc_out     = sigma_sc;
 }
