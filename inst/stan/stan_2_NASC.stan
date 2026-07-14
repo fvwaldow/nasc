@@ -1,6 +1,6 @@
 // Module 2
 functions {
-  // log Z(lambda) of the ETDir prior by Hermite-Genocchi/Opitz (required for numerical stability within Stan)
+  // log Z(lambda) of the ETDir prior, exact via Hermite-Genocchi / Opitz.
   real log_Z_etdir(real lambda, vector s_abs, int J) {
     real s_min = min(s_abs);
     matrix[J, J] B = rep_matrix(0.0, J, J);
@@ -73,7 +73,11 @@ parameters {
 transformed parameters {
   // Soft floor
   real<lower=0> sigma_sc = sqrt(square(sigma_floor) + square(sigma_raw));
-  real<lower=0> lambda   = lambda_tilde;
+  // Precision-scaled tilt: the penalty enters as one pseudo-observation at the
+  // model's own noise precision, so it competes with the likelihood curvature
+  // (~ information / sigma_sc^2) at any sigma_sc. No n_eff / covariate / time
+  // scaling: those over-weight the penalty and re-inflate lambda.
+  real<lower=0> lambda   = lambda_tilde / square(sigma_sc);
 }
 model {
   sigma_raw    ~ normal(0, 1);       // half-normal (implicit <lower=0>)
@@ -108,5 +112,5 @@ generated quantities {
   real lambda_out       = lambda;
   real lambda_tilde_out = lambda_tilde;
   real n_eff_out        = n_eff;
-  real sigma_sc_out     = sigma_sc;
+  real sigma_sc_out     = sigma_sc;   // monitor: should sit near sigma_floor
 }
