@@ -73,11 +73,7 @@ parameters {
 transformed parameters {
   // Soft floor
   real<lower=0> sigma_sc = sqrt(square(sigma_floor) + square(sigma_raw));
-  // Precision-scaled tilt: the penalty enters as one pseudo-observation at the
-  // model's own noise precision, so it competes with the likelihood curvature
-  // (~ information / sigma_sc^2) at any sigma_sc. No n_eff / covariate / time
-  // scaling: those over-weight the penalty and re-inflate lambda.
-  real<lower=0> lambda   = lambda_tilde / square(sigma_sc);
+  real<lower=0> lambda = (lambda_tilde * n_eff) / square(sigma_sc);
 }
 model {
   sigma_raw    ~ normal(0, 1);       // half-normal (implicit <lower=0>)
