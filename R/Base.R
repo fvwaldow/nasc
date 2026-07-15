@@ -36,7 +36,7 @@ nascSynth <- R6::R6Class(
     rho_time_window = NULL,
     lambda = NULL,        # user-fixed penalty strength (NULL => CV)
     lambda_cv_grid = NULL,      # candidate lambda values for CV
-    lambda_cv_folds = NULL,     # number of rolling-origin CV folds
+    lambda_train_frac = NULL,   # share of the pre-period used for training
     lambda_used = NULL,   # value actually used in Step 2
     lambda_cv_table = NULL      # CV results (grid x fold RMSE)
   ),
@@ -61,8 +61,8 @@ nascSynth <- R6::R6Class(
                           rho.covariates = NULL,
                           rho.time.window = NULL,
                           lambda = NULL,
-                          lambda_cv_grid = c(0, 0.25, 0.5, 1, 2, 4, 8, 16),
-                          lambda_cv_folds = 3L) {
+                          lambda_cv_grid = seq(from=0,to=100,by=1),
+                          lambda_train_frac = 0.8) {
 
       stopifnot(ci_width > 0 & ci_width < 1)
 
@@ -244,13 +244,15 @@ nascSynth <- R6::R6Class(
         stop("'lambda_cv_grid' must be a numeric vector (length >= 2) of ",
              "non-negative candidate values.")
       }
-      if (!is.numeric(lambda_cv_folds) || length(lambda_cv_folds) != 1L ||
-          is.na(lambda_cv_folds) || lambda_cv_folds < 1) {
-        stop("'lambda_cv_folds' must be a single positive integer.")
+      if (!is.numeric(lambda_train_frac) || length(lambda_train_frac) != 1L ||
+          is.na(lambda_train_frac) || lambda_train_frac <= 0 ||
+          lambda_train_frac >= 1) {
+        stop("'lambda_train_frac' must be a single number strictly between ",
+             "0 and 1 (share of the pre-period used for training).")
       }
       private$lambda    <- lambda
-      private$lambda_cv_grid  <- sort(unique(as.numeric(lambda_cv_grid)))
-      private$lambda_cv_folds <- as.integer(lambda_cv_folds)
+      private$lambda_cv_grid    <- sort(unique(as.numeric(lambda_cv_grid)))
+      private$lambda_train_frac <- as.numeric(lambda_train_frac)
 
       private$bias_correction <- bias_correction
       private$nasc_penalty    <- nasc_penalty
@@ -751,6 +753,12 @@ nascSynth <- R6::R6Class(
           v_cov               = if (K_cov_step2 > 0L) as.array(v_cov_vec) else numeric(0)
         )
 
+        # Reference noise scale: calibrates the penalty and keeps it out of
+        # sigma's conditional. Computed once from the unpenalized fit and used
+        # both by CV and by the final sampler, so the selected lambda is exactly
+        # the lambda deployed.
+        base_data$sigma_ref <- .compute_sigma_ref(base_data)
+
         # --- lambda: user-fixed or CV-selected -------------------------
         lt_used <- private$lambda
         if (is.null(lt_used)) {
@@ -760,20 +768,23 @@ nascSynth <- R6::R6Class(
             mean(sampled_rhos, na.rm = TRUE)
           }
           message(sprintf(
-            "Selecting lambda by %d-fold rolling-origin CV (rho = %.3f)...",
-            private$lambda_cv_folds, rho_cv))
+            "Selecting lambda by hold-out CV (%.0f%% train / %.0f%% validation just before treatment, rho = %.3f)...",
+            100 * private$lambda_train_frac,
+            100 * (1 - private$lambda_train_frac), rho_cv))
           cv_res <- .cv_lambda(
-            base_data = base_data,
-            rho       = rho_cv,
-            step2_mod = private$stan_model$step2,
-            grid      = private$lambda_cv_grid,
-            n_folds   = private$lambda_cv_folds
+            base_data  = base_data,
+            rho        = rho_cv,
+            grid       = private$lambda_cv_grid,
+            train_frac = private$lambda_train_frac
           )
           lt_used <- cv_res$lambda
           private$lambda_cv_table <- cv_res$table
-          message(sprintf("CV-selected lambda = %.4g (holdout RMSE = %.4g)",
-                          lt_used, cv_res$rmse))
+          message(sprintf(
+            "CV-selected lambda = %.4g (validation RMSE = %.4g; train = periods 1-%d, validation = %d-%d)",
+            lt_used, cv_res$rmse, max(cv_res$train),
+            min(cv_res$validation), max(cv_res$validation)))
         }
+        message(sprintf("Penalty calibrated at sigma_ref = %.4g", base_data$sigma_ref))
         private$lambda_used <- lt_used
         base_data$lambda    <- lt_used
 
@@ -848,6 +859,7 @@ nascSynth <- R6::R6Class(
           use_bias_correction = as.integer(private$bias_correction),
           use_penalty         = 0L,
           lambda        = 1.0,  # required by Stan data block; unused when use_penalty = 0
+          sigma_ref     = 1.0,  # ditto
           K_cov               = N_aug,
           X_cov0              = X_cov0_mat_nop,
           X_cov1              = if (N_aug > 0L) as.array(X_cov1_vec_nop) else numeric(0),

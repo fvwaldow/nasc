@@ -1323,130 +1323,245 @@ summary.nascSynth <- function(object, ...) {
 
 
 # ------------------------------------------------------------------------------
-# .cv_lambda: rolling-origin cross-validation for the NASC penalty
-# strength lambda.
-#
-# Design: the pre-treatment window is split into `n_folds` expanding-window
-# folds. In fold f, the model is fit (by fast MAP optimization, not MCMC) on
-# the first train_f pre-periods with the penalty at each candidate
-# lambda; the fitted weights predict the treated outcome over the next
-# holdout block; the candidate minimizing the average holdout RMSE wins.
-# Prediction uses the raw weighted donor combination (no bias correction):
-# there is no treatment in the pre-period, so contamination-free forecasting
-# accuracy is the right criterion.
-#
-# base_data: the fully assembled Step-2 data list (penalty branch), BEFORE
-#            lambda is added. Y_panel is (J+1) x T0 with the treated
-#            unit in row J+1.
-# rho:       single rho used for the contamination vector during CV (the
-#            exogenous rho, or the Step-1 posterior mean).
-# step2_mod: compiled Step-2 stanmodel.
-# grid:      candidate lambda values.
-# n_folds:   number of rolling-origin folds.
+# .simplex_project: exact Euclidean projection onto the probability simplex
+# (Duchi, Shalev-Shwartz, Singer & Chandra, 2008). Always returns a valid
+# simplex point.
 # ------------------------------------------------------------------------------
-.cv_lambda <- function(base_data, rho, step2_mod,
-                       grid    = c(0, 0.25, 0.5, 1, 2, 4, 8, 16),
-                       n_folds = 3L,
-                       min_train_frac = 0.5,
-                       n_restarts = 2L) {
+.simplex_project <- function(v) {
+  n   <- length(v)
+  u   <- sort(v, decreasing = TRUE)
+  css <- cumsum(u) - 1
+  idx <- seq_len(n)
+  ok  <- (u - css / idx) > 0
+  if (!any(ok)) return(rep(1 / n, n))
+  k <- max(idx[ok])
+  pmax(v - css[k] / k, 0)
+}
+
+# ------------------------------------------------------------------------------
+# .penalized_sc_weights: MAP donor weights of the Step-2 model, solved exactly.
+#
+# The w-dependent part of the Stan log-posterior is
+#   -(1/sigma^2) * [ 0.5*||Xs w - ys||^2
+#                    + 0.5*sum_k v_k (C1k - C0k'w)^2
+#                    + lambda*n_eff*(w's_abs) ]
+# so sigma is a positive scale factor and CANCELS from argmin_w: the MAP weights
+# are the minimizer of the bracket, a convex QP over the simplex. Solved here by
+# FISTA with exact simplex projection. This is deterministic, needs no sigma and
+# no Stan optimizer, and ALWAYS returns a valid simplex point -- which is why the
+# CV table can no longer contain NA rows. (rstan::optimizing could fail its line
+# search whenever the design has an exactly flat direction, e.g. duplicated donor
+# columns or lambda = 0 with T0 < J, leaving NA behind.)
+# ------------------------------------------------------------------------------
+.penalized_sc_weights <- function(Xs, ys, C0, C1, v_cov, s_abs, lam, n_eff,
+                                  max_iter = 5000L, tol = 1e-11) {
+  J <- ncol(Xs)
+  A <- crossprod(Xs)
+  b <- as.numeric(crossprod(Xs, ys))
+  if (length(v_cov)) {
+    for (k in seq_along(v_cov)) {
+      if (isTRUE(v_cov[k] > 0)) {
+        A <- A + v_cov[k] * tcrossprod(C0[k, ])
+        b <- b + v_cov[k] * C1[k] * C0[k, ]
+      }
+    }
+  }
+  lin  <- lam * n_eff * s_abs
+  L    <- max(abs(eigen(A, symmetric = TRUE, only.values = TRUE)$values))
+  if (!is.finite(L) || L <= 0) L <- 1
+  step <- 1 / L
+
+  w <- rep(1 / J, J); z <- w; tk <- 1
+  for (i in seq_len(max_iter)) {
+    g  <- as.numeric(A %*% z) - b + lin
+    w1 <- .simplex_project(z - step * g)
+    t1 <- (1 + sqrt(1 + 4 * tk^2)) / 2
+    z  <- w1 + ((tk - 1) / t1) * (w1 - w)
+    if (max(abs(w1 - w)) < tol) { w <- w1; break }
+    w <- w1; tk <- t1
+  }
+  w
+}
+
+# ------------------------------------------------------------------------------
+# .compute_sigma_ref: reference noise scale used to calibrate the penalty.
+#
+# The residual scale of the UNPENALIZED (lambda = 0) simplex fit over the full
+# pre-period, on the same standardized scale as the Stan model's sigma_sc, and
+# including the covariate-matching terms so it matches sigma's MLE there:
+#   sigma_ref^2 = ( SSR + sum_k v_k (C1k - C0k'w0)^2 ) / n_eff
+# Floored at the model's sigma_floor. Passed to Stan as data, so the penalty is
+# calibrated at the scale the data actually exhibit while leaving sigma's own
+# conditional untouched.
+# ------------------------------------------------------------------------------
+.compute_sigma_ref <- function(base_data, sigma_floor = 0.05) {
+  J  <- base_data$J
+  T0 <- base_data$T0
+
+  Y_panel <- base_data$Y_panel
+  y_pre   <- as.numeric(Y_panel[J + 1L, ])
+  X_don   <- t(Y_panel[seq_len(J), , drop = FALSE])     # T0 x J
+
+  mean_y <- mean(y_pre)
+  sd_y   <- stats::sd(y_pre)
+  if (!is.finite(sd_y) || sd_y <= 0) sd_y <- 1
+  ys <- (y_pre - mean_y) / sd_y
+  Xs <- (X_don - mean_y) / sd_y
+
+  K_cov <- base_data$K_cov
+  v_cov <- as.numeric(base_data$v_cov)
+  C0 <- matrix(0, nrow = max(K_cov, 1L), ncol = J)
+  C1 <- numeric(max(K_cov, 1L))
+  if (K_cov > 0) {
+    for (k in seq_len(K_cov)) {
+      m_k <- mean(base_data$X_cov0[k, ])
+      s_k <- stats::sd(base_data$X_cov0[k, ])
+      if (is.finite(s_k) && s_k > 1e-12) {
+        C0[k, ] <- (base_data$X_cov0[k, ] - m_k) / s_k
+        C1[k]   <- (base_data$X_cov1[k]   - m_k) / s_k
+      }
+    }
+  } else {
+    v_cov <- numeric(0)
+  }
+
+  n_eff <- T0 + sum(v_cov)
+  w0 <- tryCatch(
+    .penalized_sc_weights(Xs, ys, C0, C1, v_cov, rep(0, J), 0, n_eff),
+    error = function(e) rep(1 / J, J))
+
+  ss <- sum((ys - as.numeric(Xs %*% w0))^2)
+  if (length(v_cov)) {
+    for (k in seq_along(v_cov)) {
+      if (isTRUE(v_cov[k] > 0))
+        ss <- ss + v_cov[k] * (C1[k] - sum(C0[k, ] * w0))^2
+    }
+  }
+  out <- sqrt(ss / n_eff)
+  if (!is.finite(out)) out <- sigma_floor
+  max(sigma_floor, out)
+}
+
+# ------------------------------------------------------------------------------
+# .cv_lambda: single hold-out validation for the NASC penalty strength lambda.
+#
+# Partition: ONE split of the pre-period. The first `train_frac` of the
+# pre-periods are the training window; the remaining periods -- the block
+# IMMEDIATELY BEFORE the intervention -- are the validation block. With
+# T0 = 20 and train_frac = 0.8 that is train 1-16, validate 17-20.
+#
+# Rationale: the estimator's real task is to extrapolate the treated unit from
+# the pre-period into the post-period, so the validation block should be the
+# periods adjacent to treatment. Earlier folds of a rolling-origin scheme
+# validate on periods far from the intervention and dilute that signal.
+#
+# Prediction uses the raw weighted donor combination (no bias correction): there
+# is no treatment in the pre-period, so contamination-free forecasting accuracy
+# is the right criterion.
+#
+# base_data: assembled Step-2 data list (penalty branch), BEFORE `lambda` is set.
+# rho:       single rho for the contamination vector (exogenous, or the Step-1
+#            posterior mean).
+# grid:      candidate lambda values.
+# train_frac: share of the pre-period used for training.
+# ------------------------------------------------------------------------------
+.cv_lambda <- function(base_data, rho,
+                       grid       = c(0, 0.25, 0.5, 1, 2, 4, 8, 16),
+                       train_frac = 0.8,
+                       one_se     = TRUE) {
 
   J  <- base_data$J
   T0 <- base_data$T0
 
-  # Fold sizing is deliberately NOT tied to J: the simplex constraint (and the
-  # penalty for candidates > 0) keeps the MAP well-posed even when a training
-  # window is shorter than the number of donors (T0 < J), so the
-  # under-determined regime is fully supported. For the lambda = 0 candidate
-  # with train < J the MAP is set-valued along the exact-interpolation ridge;
-  # the multi-restart optimization below returns one point of that set, which
-  # is exactly the (high-variance) behavior CV should penalize.
-  min_train <- max(4L, ceiling(min_train_frac * T0))
-  if (min_train >= T0) {
-    warning("Pre-period too short for the requested folds; falling back to a ",
-            "single holdout of the last pre-period.")
-    min_train <- T0 - 1L
-    n_folds   <- 1L
-  }
+  # ---- single hold-out split, validation adjacent to the intervention --------
+  tr_end <- max(2L, floor(train_frac * T0))
+  if (tr_end >= T0) tr_end <- T0 - 1L
+  ho_idx <- (tr_end + 1L):T0
+  if (tr_end < 2L || !length(ho_idx))
+    stop("Pre-period too short to form a train/validation split.")
 
-  # Expanding-window fold boundaries: train on 1..cut_f, predict cut_f+1..cut_{f+1}.
-  cuts <- unique(round(seq(min_train, T0, length.out = n_folds + 1L)))
-  if (length(cuts) < 2L) cuts <- c(min_train, T0)
-  n_folds_eff <- length(cuts) - 1L
-
-  Y_panel <- base_data$Y_panel               # (J+1) x T0
-  y_tr    <- as.numeric(Y_panel[J + 1L, ])   # treated pre path
+  Y_panel <- base_data$Y_panel                        # (J+1) x T0
+  y_tr    <- as.numeric(Y_panel[J + 1L, ])            # treated pre path
   X_don   <- t(Y_panel[seq_len(J), , drop = FALSE])   # T0 x J
 
-  rmse_mat <- matrix(NA_real_, nrow = length(grid), ncol = n_folds_eff,
-                     dimnames = list(paste0("lt=", grid),
-                                     paste0("fold", seq_len(n_folds_eff))))
+  # contamination vector, same construction as the Stan model
+  s_abs <- abs(as.numeric(rho * solve(diag(J) - rho * base_data$W_J,
+                                      base_data$w_J1)))
 
-  for (f in seq_len(n_folds_eff)) {
-    tr_end  <- cuts[f]
-    ho_idx  <- (cuts[f] + 1L):cuts[f + 1L]
-    if (length(ho_idx) < 1L) next
+  # standardization exactly as in the Stan transformed-data block, computed on
+  # the TRAINING window only
+  y_train <- y_tr[seq_len(tr_end)]
+  mean_y  <- mean(y_train)
+  sd_y    <- stats::sd(y_train)
+  if (!is.finite(sd_y) || sd_y <= 0) sd_y <- 1
+  ys <- (y_train - mean_y) / sd_y
+  Xs <- (X_don[seq_len(tr_end), , drop = FALSE] - mean_y) / sd_y
 
-    d <- base_data
-    d$T0      <- tr_end
-    d$Y_panel <- Y_panel[, seq_len(tr_end), drop = FALSE]
-    d$T_post  <- length(ho_idx)
-    d$Y0_post <- X_don[ho_idx, , drop = FALSE]
-    d$Y1_post <- as.array(y_tr[ho_idx])
-    d$rho     <- rho
-    d$use_bias_correction <- 0L
-    d$use_penalty         <- 1L
-
-    for (g in seq_along(grid)) {
-      d$lambda <- grid[g]
-
-      w_hat <- NULL
-      best_lp <- -Inf
-      for (r in seq_len(max(1L, n_restarts))) {
-        opt <- tryCatch(
-          rstan::optimizing(step2_mod, data = d, as_vector = FALSE,
-                            seed = 1000L + 97L * r,
-                            hessian = FALSE, verbose = FALSE),
-          error = function(e) NULL
-        )
-        if (!is.null(opt) && is.finite(opt$value) && opt$value > best_lp) {
-          best_lp <- opt$value
-          w_hat   <- as.numeric(opt$par$w)
-        }
+  K_cov <- base_data$K_cov
+  v_cov <- as.numeric(base_data$v_cov)
+  C0 <- matrix(0, nrow = max(K_cov, 1L), ncol = J)
+  C1 <- numeric(max(K_cov, 1L))
+  if (K_cov > 0) {
+    for (k in seq_len(K_cov)) {
+      m_k <- mean(base_data$X_cov0[k, ])
+      s_k <- stats::sd(base_data$X_cov0[k, ])
+      if (is.finite(s_k) && s_k > 1e-12) {
+        C0[k, ] <- (base_data$X_cov0[k, ] - m_k) / s_k
+        C1[k]   <- (base_data$X_cov1[k]   - m_k) / s_k
       }
-      if (is.null(w_hat)) next
-
-      pred <- as.numeric(X_don[ho_idx, , drop = FALSE] %*% w_hat)
-      rmse_mat[g, f] <- sqrt(mean((y_tr[ho_idx] - pred)^2))
     }
+  } else {
+    v_cov <- numeric(0)
   }
 
-  mean_rmse <- rowMeans(rmse_mat, na.rm = TRUE)
-  if (all(!is.finite(mean_rmse))) {
-    warning("CV failed for all lambda candidates; using lambda = 1.")
-    return(list(lambda = 1.0, rmse = NA_real_,
-                table = data.frame(lambda = grid,
-                                   mean_rmse = mean_rmse, rmse_mat)))
+  n_eff <- tr_end + sum(v_cov)          # n_eff on the TRAINING window
+
+  # ---- evaluate the grid on the hold-out block ------------------------------
+  X_ho <- X_don[ho_idx, , drop = FALSE]
+  y_ho <- y_tr[ho_idx]
+
+  n_g   <- length(grid)
+  rmse  <- rep(NA_real_, n_g)
+  se    <- rep(NA_real_, n_g)
+  contam <- rep(NA_real_, n_g)
+
+  for (g in seq_len(n_g)) {
+    w <- tryCatch(
+      .penalized_sc_weights(Xs, ys, C0, C1, v_cov, s_abs, grid[g], n_eff),
+      error = function(e) NULL)
+    if (is.null(w) || anyNA(w)) next
+    resid     <- y_ho - as.numeric(X_ho %*% w)
+    rmse[g]   <- sqrt(mean(resid^2))
+    contam[g] <- sum(w * s_abs)
+    # hold-out SE of the RMSE, delta method from the squared errors. With a
+    # single fold there is no across-fold SD to use, so the one-SE rule draws
+    # its scale from within the validation block instead.
+    e2 <- resid^2
+    se[g] <- if (length(e2) > 1L && mean(e2) > 0)
+      (stats::sd(e2) / sqrt(length(e2))) / (2 * sqrt(mean(e2))) else 0
   }
 
-  # One-standard-error style tie-breaking toward LARGER lambda: among
-  # candidates within one holdout-SE of the minimum, take the largest, so
-  # ties along flat CV curves resolve toward more regularization rather
-  # than lambda ~ 0 (pre-period fit alone is often nearly flat in it).
-  se_min <- {
-    g_min <- which.min(mean_rmse)
-    v <- rmse_mat[g_min, ]
-    v <- v[is.finite(v)]
-    if (length(v) > 1L) stats::sd(v) / sqrt(length(v)) else 0
-  }
-  eligible <- which(mean_rmse <= min(mean_rmse, na.rm = TRUE) + se_min)
-  g_pick   <- max(eligible)
+  tbl <- data.frame(lambda = grid, rmse = rmse, se = se,
+                    contamination = contam, picked = FALSE)
 
-  list(
-    lambda = grid[g_pick],
-    rmse         = mean_rmse[g_pick],
-    table        = data.frame(lambda = grid,
-                              mean_rmse    = as.numeric(mean_rmse),
-                              picked       = seq_along(grid) == g_pick,
-                              rmse_mat, check.names = FALSE)
-  )
+  if (all(!is.finite(rmse))) {
+    warning("Hold-out CV failed for every lambda candidate; using lambda = 0.")
+    return(list(lambda = 0, rmse = NA_real_, train = seq_len(tr_end),
+                validation = ho_idx, table = tbl))
+  }
+
+  # One-standard-error rule, breaking ties toward MORE regularization: among
+  # candidates within one hold-out SE of the best RMSE, take the largest lambda.
+  # The pre-fit curve is often nearly flat in lambda, so a plain argmin would
+  # select lambda ~ 0 on noise alone.
+  g_min  <- which.min(rmse)
+  thresh <- if (isTRUE(one_se)) rmse[g_min] + se[g_min] else rmse[g_min]
+  g_pick <- max(which(is.finite(rmse) & rmse <= thresh))
+  tbl$picked[g_pick] <- TRUE
+
+  list(lambda     = grid[g_pick],
+       rmse       = rmse[g_pick],
+       train      = seq_len(tr_end),
+       validation = ho_idx,
+       table      = tbl)
 }

@@ -15,7 +15,8 @@ data {
   real<lower=-1, upper=1> rho;
   int<lower=0, upper=1> use_bias_correction;
   int<lower=0, upper=1> use_penalty;
-  real<lower=0> lambda;   // CV-selected (or user-fixed) penalty strength
+  real<lower=0> lambda;      // CV-selected (or user-fixed) penalty strength
+  real<lower=0> sigma_ref;   // reference noise scale (data): calibrates the penalty
 }
 transformed data {
   matrix[J, J] I_J = diag_matrix(rep_vector(1.0, J));
@@ -60,12 +61,22 @@ parameters {
 transformed parameters {
   // Soft floor
   real<lower=0> sigma_sc = sqrt(square(sigma_floor) + square(sigma_raw));
-  // Penalty strength: lambda is fixed by CV upstream, scaled by the
-  // effective sample size and the likelihood precision so the penalty
-  // competes with the pre-fit information at any sigma_sc. With lambda
-  // fixed, no ETDir normalizing constant is needed: the model is a valid
+  // Penalty strength, calibrated at the REFERENCE noise scale sigma_ref (data,
+  // = the residual scale of the unpenalized simplex fit) rather than at the
+  // sampled sigma_sc. lambda is fixed by CV upstream, so lambda_tilde is a
+  // CONSTANT and no ETDir normalizing constant is needed: the model is a valid
   // penalized (Gibbs) posterior as written.
-  real<lower=0> lambda_tilde   = (lambda * n_eff) / square(sigma_sc);
+  //
+  // Why not square(sigma_sc): that makes the penalty term sigma-dependent, so it
+  // enters sigma's own conditional and inflates it --
+  //   sigma^2 = (SSR + 2*lambda*n_eff*(w's)) / n_eff
+  // -- which corrupts sigma as an estimate of pre-fit noise and widens every
+  // predictive interval. With sigma_ref the penalty drops out of sigma's
+  // conditional entirely (sigma^2 = SSR / n_eff, as in the unpenalized model)
+  // while remaining calibrated in likelihood-precision units at the scale the
+  // data actually exhibit. The CV-selected lambda is then exactly the lambda
+  // deployed, since CV calibrates at the same reference scale.
+  real<lower=0> lambda_tilde   = (lambda * n_eff) / square(sigma_ref);
 }
 model {
   sigma_raw    ~ normal(0, 1);       // half-normal (implicit <lower=0>)
@@ -99,4 +110,5 @@ generated quantities {
   real lambda_out = lambda;
   real n_eff_out        = n_eff;
   real sigma_sc_out     = sigma_sc;   // monitor: should sit near sigma_floor
+  real sigma_ref_out    = sigma_ref;
 }
