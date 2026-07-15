@@ -1,17 +1,4 @@
 // Module 2
-functions {
-  // log Z(lambda) of the ETDir prior, exact via Hermite-Genocchi / Opitz.
-  real log_Z_etdir(real lambda, vector s_abs, int J) {
-    real s_min = min(s_abs);
-    matrix[J, J] B = rep_matrix(0.0, J, J);
-    for (j in 1:J) {
-      B[j, j] = -lambda * (s_abs[j] - s_min);
-      if (j < J)
-        B[j, j + 1] = 1.0;
-    }
-    return lgamma(J) - lambda * s_min + log(matrix_exp(B)[1, J]);
-  }
-}
 data {
   int<lower=0> J;
   int<lower=1> T0;
@@ -28,6 +15,7 @@ data {
   real<lower=-1, upper=1> rho;
   int<lower=0, upper=1> use_bias_correction;
   int<lower=0, upper=1> use_penalty;
+  real<lower=0> lambda;   // CV-selected (or user-fixed) penalty strength
 }
 transformed data {
   matrix[J, J] I_J = diag_matrix(rep_vector(1.0, J));
@@ -68,20 +56,22 @@ transformed data {
 parameters {
   simplex[J]    w;             // SC donor weights
   real<lower=0> sigma_raw;     // free part of the likelihood SD
-  real<lower=0> lambda_tilde;
 }
 transformed parameters {
   // Soft floor
   real<lower=0> sigma_sc = sqrt(square(sigma_floor) + square(sigma_raw));
-  real<lower=0> lambda = (lambda_tilde * n_eff) / square(sigma_sc);
+  // Penalty strength: lambda is fixed by CV upstream, scaled by the
+  // effective sample size and the likelihood precision so the penalty
+  // competes with the pre-fit information at any sigma_sc. With lambda
+  // fixed, no ETDir normalizing constant is needed: the model is a valid
+  // penalized (Gibbs) posterior as written.
+  real<lower=0> lambda_tilde   = (lambda * n_eff) / square(sigma_sc);
 }
 model {
   sigma_raw    ~ normal(0, 1);       // half-normal (implicit <lower=0>)
-  lambda_tilde ~ gamma(2, 1);
 
   if (use_penalty)
-    target += -lambda * dot_product(w, s_abs)
-              - log_Z_etdir(lambda, s_abs, J); // nasc penalty (proper ETDir)
+    target += -lambda_tilde * dot_product(w, s_abs); // nasc penalty
 
   target += normal_lpdf(y_pre_std | X_pre_std * w, sigma_sc); // outcome likelihood
 
@@ -105,8 +95,8 @@ generated quantities {
   for (t in 1:T_post)
     y_counterfactual[t] = normal_rng(dot_product(Y0_post_std[t, ], w), sigma_sc)
                           * sd_y + mean_y;
-  real lambda_out       = lambda;
-  real lambda_tilde_out = lambda_tilde;
+  real lambda_tilde_out       = lambda_tilde;
+  real lambda_out = lambda;
   real n_eff_out        = n_eff;
   real sigma_sc_out     = sigma_sc;   // monitor: should sit near sigma_floor
 }

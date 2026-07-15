@@ -33,7 +33,12 @@ nascSynth <- R6::R6Class(
     time_predictors_prior = NULL,
     predictor_labels = NULL,
     rho_covariates = NULL,
-    rho_time_window = NULL
+    rho_time_window = NULL,
+    lambda = NULL,        # user-fixed penalty strength (NULL => CV)
+    lambda_cv_grid = NULL,      # candidate lambda values for CV
+    lambda_cv_folds = NULL,     # number of rolling-origin CV folds
+    lambda_used = NULL,   # value actually used in Step 2
+    lambda_cv_table = NULL      # CV results (grid x fold RMSE)
   ),
   active = list(
     plotData = function() { return(private$plot_data) },
@@ -54,7 +59,10 @@ nascSynth <- R6::R6Class(
                           special.predictors = NULL,
                           time.predictors.prior = NULL,
                           rho.covariates = NULL,
-                          rho.time.window = NULL) {
+                          rho.time.window = NULL,
+                          lambda = NULL,
+                          lambda_cv_grid = c(0, 0.25, 0.5, 1, 2, 4, 8, 16),
+                          lambda_cv_folds = 3L) {
 
       stopifnot(ci_width > 0 & ci_width < 1)
 
@@ -223,6 +231,27 @@ nascSynth <- R6::R6Class(
       private$W               <- W
       private$spatial_model   <- spatial_model
       private$rho_exogenous   <- rho
+
+      # lambda / CV settings (module 2 penalty only)
+      if (!is.null(lambda)) {
+        if (!is.numeric(lambda) || length(lambda) != 1L ||
+            is.na(lambda) || lambda < 0) {
+          stop("'lambda' must be a single non-negative numeric value.")
+        }
+      }
+      if (!is.numeric(lambda_cv_grid) || length(lambda_cv_grid) < 2L ||
+          anyNA(lambda_cv_grid) || any(lambda_cv_grid < 0)) {
+        stop("'lambda_cv_grid' must be a numeric vector (length >= 2) of ",
+             "non-negative candidate values.")
+      }
+      if (!is.numeric(lambda_cv_folds) || length(lambda_cv_folds) != 1L ||
+          is.na(lambda_cv_folds) || lambda_cv_folds < 1) {
+        stop("'lambda_cv_folds' must be a single positive integer.")
+      }
+      private$lambda    <- lambda
+      private$lambda_cv_grid  <- sort(unique(as.numeric(lambda_cv_grid)))
+      private$lambda_cv_folds <- as.integer(lambda_cv_folds)
+
       private$bias_correction <- bias_correction
       private$nasc_penalty    <- nasc_penalty
       private$uses_rho        <- uses_rho
@@ -722,6 +751,32 @@ nascSynth <- R6::R6Class(
           v_cov               = if (K_cov_step2 > 0L) as.array(v_cov_vec) else numeric(0)
         )
 
+        # --- lambda: user-fixed or CV-selected -------------------------
+        lt_used <- private$lambda
+        if (is.null(lt_used)) {
+          rho_cv <- if (length(sampled_rhos) == 1L && !is.na(sampled_rhos[1])) {
+            sampled_rhos[1]
+          } else {
+            mean(sampled_rhos, na.rm = TRUE)
+          }
+          message(sprintf(
+            "Selecting lambda by %d-fold rolling-origin CV (rho = %.3f)...",
+            private$lambda_cv_folds, rho_cv))
+          cv_res <- .cv_lambda(
+            base_data = base_data,
+            rho       = rho_cv,
+            step2_mod = private$stan_model$step2,
+            grid      = private$lambda_cv_grid,
+            n_folds   = private$lambda_cv_folds
+          )
+          lt_used <- cv_res$lambda
+          private$lambda_cv_table <- cv_res$table
+          message(sprintf("CV-selected lambda = %.4g (holdout RMSE = %.4g)",
+                          lt_used, cv_res$rmse))
+        }
+        private$lambda_used <- lt_used
+        base_data$lambda    <- lt_used
+
         results <- .run_step2_loop(
           rhos          = sampled_rhos,
           base_data     = base_data,
@@ -729,8 +784,8 @@ nascSynth <- R6::R6Class(
           rho_field     = "rho",
           cores         = cores,
           extra_args    = list(...),
-          extract_pars  = c("y_counterfactual", "y_sim_pre", "w", "lambda",
-                            "lambda_tilde", "sigma_sc", "bias_correction"),
+          extract_pars  = c("y_counterfactual", "y_sim_pre", "w", "lambda_tilde",
+                            "sigma_sc", "bias_correction"),
           worker_iter   = worker_iter,
           worker_warmup = worker_warmup
         )
@@ -741,8 +796,8 @@ nascSynth <- R6::R6Class(
           y_counterfactual = results$y_counterfactual,
           y_sim_pre        = results$y_sim_pre,
           w                = results$w,
-          lambda           = results$lambda,
-          lambda_tilde     = results$lambda_tilde,
+          lambda_tilde           = results$lambda_tilde,
+          lambda     = lt_used,
           sigma_sc         = results$sigma_sc,
           bias_correction  = results$bias_correction,
           rhos_used        = results$rhos_used,
@@ -792,6 +847,7 @@ nascSynth <- R6::R6Class(
             post_data |> dplyr::pull(!!private$outcome))),
           use_bias_correction = as.integer(private$bias_correction),
           use_penalty         = 0L,
+          lambda        = 1.0,  # required by Stan data block; unused when use_penalty = 0
           K_cov               = N_aug,
           X_cov0              = X_cov0_mat_nop,
           X_cov1              = if (N_aug > 0L) as.array(X_cov1_vec_nop) else numeric(0),
@@ -1103,8 +1159,8 @@ nascSynth <- R6::R6Class(
       }
 
       if (!is.null(private$y_synth_draws)) {
-        if (!is.null(private$y_synth_draws$lambda)) {
-          add_panel("lambda", private$y_synth_draws$lambda)
+        if (!is.null(private$y_synth_draws$lambda_tilde)) {
+          add_panel("lambda_tilde", private$y_synth_draws$lambda_tilde)
         }
         if (!is.null(private$y_synth_draws$sigma_sc)) {
           add_panel("sigma_step2", private$y_synth_draws$sigma_sc)
@@ -1325,6 +1381,13 @@ nascSynth <- R6::R6Class(
     },
 
     # Plot of the posterior weight density per donor
+    # CV table and selected penalty strength (NULL until $fit() with
+    # nasc_penalty = TRUE and lambda = NULL has been run).
+    lambdaCV = function() {
+      list(lambda = private$lambda_used,
+           table        = private$lambda_cv_table)
+    },
+
     weightDraws = function(overlap = 0.5, scale = 1.4, fill_alpha = 0.85) {
       if (is.null(private$fitted)) stop("Run $fit() before calling weightDraws().")
 

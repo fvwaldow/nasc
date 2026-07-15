@@ -702,8 +702,8 @@
   if (!is.null(sigma_draws)) {
     param_rows[["sigma"]] <- .posterior_summary(as.numeric(sigma_draws), ci)
   }
-  if (!is.null(draws$lambda)) {
-    param_rows[["lambda"]] <- .posterior_summary(as.numeric(draws$lambda), ci)
+  if (!is.null(draws$lambda_tilde)) {
+    param_rows[["lambda_tilde"]] <- .posterior_summary(as.numeric(draws$lambda_tilde), ci)
   }
   if (parts$bias_correction && !is.null(draws$bias_correction)) {
     param_rows[["bias_correction"]] <- .posterior_summary(bc_vec, ci)
@@ -1318,5 +1318,135 @@ summary.nascSynth <- function(object, ...) {
     delta_total    = delta_total,     # n_draws x T_post
     avg_per_donor  = avg_per_donor,   # n_draws x J
     avg_total      = avg_total        # n_draws
+  )
+}
+
+
+# ------------------------------------------------------------------------------
+# .cv_lambda: rolling-origin cross-validation for the NASC penalty
+# strength lambda.
+#
+# Design: the pre-treatment window is split into `n_folds` expanding-window
+# folds. In fold f, the model is fit (by fast MAP optimization, not MCMC) on
+# the first train_f pre-periods with the penalty at each candidate
+# lambda; the fitted weights predict the treated outcome over the next
+# holdout block; the candidate minimizing the average holdout RMSE wins.
+# Prediction uses the raw weighted donor combination (no bias correction):
+# there is no treatment in the pre-period, so contamination-free forecasting
+# accuracy is the right criterion.
+#
+# base_data: the fully assembled Step-2 data list (penalty branch), BEFORE
+#            lambda is added. Y_panel is (J+1) x T0 with the treated
+#            unit in row J+1.
+# rho:       single rho used for the contamination vector during CV (the
+#            exogenous rho, or the Step-1 posterior mean).
+# step2_mod: compiled Step-2 stanmodel.
+# grid:      candidate lambda values.
+# n_folds:   number of rolling-origin folds.
+# ------------------------------------------------------------------------------
+.cv_lambda <- function(base_data, rho, step2_mod,
+                       grid    = c(0, 0.25, 0.5, 1, 2, 4, 8, 16),
+                       n_folds = 3L,
+                       min_train_frac = 0.5,
+                       n_restarts = 2L) {
+
+  J  <- base_data$J
+  T0 <- base_data$T0
+
+  # Fold sizing is deliberately NOT tied to J: the simplex constraint (and the
+  # penalty for candidates > 0) keeps the MAP well-posed even when a training
+  # window is shorter than the number of donors (T0 < J), so the
+  # under-determined regime is fully supported. For the lambda = 0 candidate
+  # with train < J the MAP is set-valued along the exact-interpolation ridge;
+  # the multi-restart optimization below returns one point of that set, which
+  # is exactly the (high-variance) behavior CV should penalize.
+  min_train <- max(4L, ceiling(min_train_frac * T0))
+  if (min_train >= T0) {
+    warning("Pre-period too short for the requested folds; falling back to a ",
+            "single holdout of the last pre-period.")
+    min_train <- T0 - 1L
+    n_folds   <- 1L
+  }
+
+  # Expanding-window fold boundaries: train on 1..cut_f, predict cut_f+1..cut_{f+1}.
+  cuts <- unique(round(seq(min_train, T0, length.out = n_folds + 1L)))
+  if (length(cuts) < 2L) cuts <- c(min_train, T0)
+  n_folds_eff <- length(cuts) - 1L
+
+  Y_panel <- base_data$Y_panel               # (J+1) x T0
+  y_tr    <- as.numeric(Y_panel[J + 1L, ])   # treated pre path
+  X_don   <- t(Y_panel[seq_len(J), , drop = FALSE])   # T0 x J
+
+  rmse_mat <- matrix(NA_real_, nrow = length(grid), ncol = n_folds_eff,
+                     dimnames = list(paste0("lt=", grid),
+                                     paste0("fold", seq_len(n_folds_eff))))
+
+  for (f in seq_len(n_folds_eff)) {
+    tr_end  <- cuts[f]
+    ho_idx  <- (cuts[f] + 1L):cuts[f + 1L]
+    if (length(ho_idx) < 1L) next
+
+    d <- base_data
+    d$T0      <- tr_end
+    d$Y_panel <- Y_panel[, seq_len(tr_end), drop = FALSE]
+    d$T_post  <- length(ho_idx)
+    d$Y0_post <- X_don[ho_idx, , drop = FALSE]
+    d$Y1_post <- as.array(y_tr[ho_idx])
+    d$rho     <- rho
+    d$use_bias_correction <- 0L
+    d$use_penalty         <- 1L
+
+    for (g in seq_along(grid)) {
+      d$lambda <- grid[g]
+
+      w_hat <- NULL
+      best_lp <- -Inf
+      for (r in seq_len(max(1L, n_restarts))) {
+        opt <- tryCatch(
+          rstan::optimizing(step2_mod, data = d, as_vector = FALSE,
+                            seed = 1000L + 97L * r,
+                            hessian = FALSE, verbose = FALSE),
+          error = function(e) NULL
+        )
+        if (!is.null(opt) && is.finite(opt$value) && opt$value > best_lp) {
+          best_lp <- opt$value
+          w_hat   <- as.numeric(opt$par$w)
+        }
+      }
+      if (is.null(w_hat)) next
+
+      pred <- as.numeric(X_don[ho_idx, , drop = FALSE] %*% w_hat)
+      rmse_mat[g, f] <- sqrt(mean((y_tr[ho_idx] - pred)^2))
+    }
+  }
+
+  mean_rmse <- rowMeans(rmse_mat, na.rm = TRUE)
+  if (all(!is.finite(mean_rmse))) {
+    warning("CV failed for all lambda candidates; using lambda = 1.")
+    return(list(lambda = 1.0, rmse = NA_real_,
+                table = data.frame(lambda = grid,
+                                   mean_rmse = mean_rmse, rmse_mat)))
+  }
+
+  # One-standard-error style tie-breaking toward LARGER lambda: among
+  # candidates within one holdout-SE of the minimum, take the largest, so
+  # ties along flat CV curves resolve toward more regularization rather
+  # than lambda ~ 0 (pre-period fit alone is often nearly flat in it).
+  se_min <- {
+    g_min <- which.min(mean_rmse)
+    v <- rmse_mat[g_min, ]
+    v <- v[is.finite(v)]
+    if (length(v) > 1L) stats::sd(v) / sqrt(length(v)) else 0
+  }
+  eligible <- which(mean_rmse <= min(mean_rmse, na.rm = TRUE) + se_min)
+  g_pick   <- max(eligible)
+
+  list(
+    lambda = grid[g_pick],
+    rmse         = mean_rmse[g_pick],
+    table        = data.frame(lambda = grid,
+                              mean_rmse    = as.numeric(mean_rmse),
+                              picked       = seq_along(grid) == g_pick,
+                              rmse_mat, check.names = FALSE)
   )
 }
