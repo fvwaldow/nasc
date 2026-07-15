@@ -768,9 +768,7 @@ nascSynth <- R6::R6Class(
             mean(sampled_rhos, na.rm = TRUE)
           }
           message(sprintf(
-            "Selecting lambda by hold-out CV (%.0f%% train / %.0f%% validation just before treatment, rho = %.3f)...",
-            100 * private$lambda_train_frac,
-            100 * (1 - private$lambda_train_frac), rho_cv))
+            "Hold-out CV via MAP with rho = %.3f)...", rho_cv))
           cv_res <- .cv_lambda(
             base_data  = base_data,
             rho        = rho_cv,
@@ -780,11 +778,10 @@ nascSynth <- R6::R6Class(
           lt_used <- cv_res$lambda
           private$lambda_cv_table <- cv_res$table
           message(sprintf(
-            "CV-selected lambda = %.4g (validation RMSE = %.4g; train = periods 1-%d, validation = %d-%d)",
-            lt_used, cv_res$rmse, max(cv_res$train),
-            min(cv_res$validation), max(cv_res$validation)))
+            "lambda = %.4g, RMSE = %.4g",
+            lt_used, cv_res$rmse))
         }
-        message(sprintf("Penalty calibrated at sigma_ref = %.4g", base_data$sigma_ref))
+        message(sprintf("CR Penalty calibrated at sigma = %.4g", base_data$sigma_ref))
         private$lambda_used <- lt_used
         base_data$lambda    <- lt_used
 

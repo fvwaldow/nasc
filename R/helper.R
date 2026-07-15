@@ -1466,9 +1466,9 @@ summary.nascSynth <- function(object, ...) {
 # train_frac: share of the pre-period used for training.
 # ------------------------------------------------------------------------------
 .cv_lambda <- function(base_data, rho,
-                       grid       = c(0, 0.25, 0.5, 1, 2, 4, 8, 16),
+                       grid       = seq(from=0,to=100,by=1),
                        train_frac = 0.8,
-                       one_se     = TRUE) {
+                       one_se     = FALSE) {
 
   J  <- base_data$J
   T0 <- base_data$T0
