@@ -61,7 +61,7 @@ nascSynth <- R6::R6Class(
                           rho.covariates = NULL,
                           rho.time.window = NULL,
                           lambda = NULL,
-                          lambda_cv_grid = seq(from=0,to=100,by=1),
+                          lambda_cv_grid = seq(from=0, to=100, by =1),
                           lambda_train_frac = 0.8) {
 
       stopifnot(ci_width > 0 & ci_width < 1)
@@ -768,7 +768,9 @@ nascSynth <- R6::R6Class(
             mean(sampled_rhos, na.rm = TRUE)
           }
           message(sprintf(
-            "Hold-out CV via MAP with rho = %.3f)...", rho_cv))
+            "Selecting lambda by hold-out CV (%.0f%% train / %.0f%% validation just before treatment, rho = %.3f)...",
+            100 * private$lambda_train_frac,
+            100 * (1 - private$lambda_train_frac), rho_cv))
           cv_res <- .cv_lambda(
             base_data  = base_data,
             rho        = rho_cv,
@@ -778,10 +780,11 @@ nascSynth <- R6::R6Class(
           lt_used <- cv_res$lambda
           private$lambda_cv_table <- cv_res$table
           message(sprintf(
-            "lambda = %.4g, RMSE = %.4g",
-            lt_used, cv_res$rmse))
+            "CV-selected lambda = %.4g (validation RMSE = %.4g; train = periods 1-%d, validation = %d-%d)",
+            lt_used, cv_res$rmse, max(cv_res$train),
+            min(cv_res$validation), max(cv_res$validation)))
         }
-        message(sprintf("CR Penalty calibrated at sigma = %.4g", base_data$sigma_ref))
+        message(sprintf("Penalty calibrated at sigma_ref = %.4g", base_data$sigma_ref))
         private$lambda_used <- lt_used
         base_data$lambda    <- lt_used
 
@@ -792,8 +795,8 @@ nascSynth <- R6::R6Class(
           rho_field     = "rho",
           cores         = cores,
           extra_args    = list(...),
-          extract_pars  = c("y_counterfactual", "y_sim_pre", "w", "lambda_tilde",
-                            "sigma_sc", "bias_correction"),
+          extract_pars  = c("y_counterfactual", "y_sim_pre", "w",
+                            "lambda_tilde_out", "sigma_sc", "bias_correction"),
           worker_iter   = worker_iter,
           worker_warmup = worker_warmup
         )
@@ -804,7 +807,7 @@ nascSynth <- R6::R6Class(
           y_counterfactual = results$y_counterfactual,
           y_sim_pre        = results$y_sim_pre,
           w                = results$w,
-          lambda_tilde           = results$lambda_tilde,
+          lambda_tilde     = results$lambda_tilde_out,
           lambda     = lt_used,
           sigma_sc         = results$sigma_sc,
           bias_correction  = results$bias_correction,

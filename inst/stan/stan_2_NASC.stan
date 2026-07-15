@@ -53,19 +53,15 @@ transformed data {
   real n_eff = T0 + sum(v_cov);
 
   real sigma_floor = 0.05;
-}
-parameters {
-  simplex[J]    w;             // SC donor weights
-  real<lower=0> sigma_raw;     // free part of the likelihood SD
-}
-transformed parameters {
-  // Soft floor
-  real<lower=0> sigma_sc = sqrt(square(sigma_floor) + square(sigma_raw));
+
   // Penalty strength, calibrated at the REFERENCE noise scale sigma_ref (data,
   // = the residual scale of the unpenalized simplex fit) rather than at the
-  // sampled sigma_sc. lambda is fixed by CV upstream, so lambda_tilde is a
-  // CONSTANT and no ETDir normalizing constant is needed: the model is a valid
-  // penalized (Gibbs) posterior as written.
+  // sampled sigma_sc. lambda is fixed by CV upstream, so lambda_tilde depends on
+  // DATA ONLY: it lives here in transformed data, is computed once as a plain
+  // double, and never enters the autodiff tape or the per-draw output. (In
+  // transformed parameters it would be promoted to a var with zero derivatives
+  // and written out every draw.) With lambda fixed, no ETDir normalizing
+  // constant is needed: the model is a valid penalized (Gibbs) posterior.
   //
   // Why not square(sigma_sc): that makes the penalty term sigma-dependent, so it
   // enters sigma's own conditional and inflates it --
@@ -76,7 +72,15 @@ transformed parameters {
   // while remaining calibrated in likelihood-precision units at the scale the
   // data actually exhibit. The CV-selected lambda is then exactly the lambda
   // deployed, since CV calibrates at the same reference scale.
-  real<lower=0> lambda_tilde   = (lambda * n_eff) / square(sigma_ref);
+  real lambda_tilde = (lambda * n_eff) / square(sigma_ref);
+}
+parameters {
+  simplex[J]    w;             // SC donor weights
+  real<lower=0> sigma_raw;     // free part of the likelihood SD
+}
+transformed parameters {
+  // Soft floor
+  real<lower=0> sigma_sc = sqrt(square(sigma_floor) + square(sigma_raw));
 }
 model {
   sigma_raw    ~ normal(0, 1);       // half-normal (implicit <lower=0>)
