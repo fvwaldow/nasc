@@ -1331,46 +1331,140 @@ summary.nascSynth <- function(object, ...) {
 
 # ------------------------------------------------------------------------------
 # .nasc_indirect_matrix: posterior-mean indirect (spillover) effect per donor
-# and post-period -- the per-donor reduction of .nasc_indirect_draws()$delta_arr
+# and period -- the per-donor reduction of .nasc_indirect_draws()$delta_arr
 # that tauPlot()/attPlot() collapse to a donor average.
 #
+# `pre` controls the pre-treatment periods:
+#   "zero"    (default) delta_j(t) = tau(t) * s_j with tau(t) = 0 before
+#             treatment, so the spillover is EXACTLY zero. This is imposed by
+#             the structure, not estimated -- there is no uncertainty to show.
+#   "drop"    post-treatment periods only.
+#   "placebo" the pre-treatment fit residual carried through the same
+#             contamination vector, delta_j(t) = tau_pre(t) * s_j. This is the
+#             exact analogue of what the DIRECT panel shows before treatment
+#             (a posterior-predictive residual from y_sim_pre, i.e. a balance
+#             diagnostic rather than an effect), but since s_j is a constant
+#             per donor it is that same residual rescaled -- it carries no
+#             information the direct panel does not already show.
+#
 # Returns a list with
-#   time_post : post-treatment periods (length T_post)
-#   donors    : donor labels (length J)
-#   mean      : T_post x J matrix of posterior means (rows = periods)
-#   avg       : length-T_post donor average (= delta_total / J)
+#   time   : periods (length T)
+#   donors : donor labels (length J)
+#   mean   : T x J matrix of posterior means (rows = periods)
+#   avg    : length-T donor average
+#   pre    : the `pre` mode used
 # plus `lower`/`upper` matrices when `ci` is supplied. Returns NULL when the fit
 # carries no spatial information (uses_rho = FALSE or no W).
 # ------------------------------------------------------------------------------
-.nasc_indirect_matrix <- function(model, ci = NULL) {
+.nasc_indirect_matrix <- function(model, ci = NULL,
+                                  pre = c("zero", "drop", "placebo")) {
+  pre <- match.arg(pre)
+
   ind <- tryCatch(.nasc_indirect_draws(model), error = function(e) NULL)
   if (is.null(ind)) return(NULL)
 
   delta  <- ind$delta_arr                       # n_draws x T_post x J
   T_post <- dim(delta)[2L]
   J      <- dim(delta)[3L]
+  donors <- ind$donor_names
 
+  times    <- ind$time_post
   mean_mat <- matrix(apply(delta, c(2L, 3L), mean),
                      nrow = T_post, ncol = J,
-                     dimnames = list(NULL, ind$donor_names))
+                     dimnames = list(NULL, donors))
 
-  out <- list(
-    time_post = ind$time_post,
-    donors    = ind$donor_names,
-    mean      = mean_mat,
-    avg       = rowMeans(mean_mat)
-  )
-
+  lo_mat <- up_mat <- NULL
   if (!is.null(ci)) {
     p <- .ci_probs(ci)
-    out$lower <- matrix(apply(delta, c(2L, 3L), stats::quantile,
-                              probs = p[1], names = FALSE),
-                        nrow = T_post, ncol = J,
-                        dimnames = list(NULL, ind$donor_names))
-    out$upper <- matrix(apply(delta, c(2L, 3L), stats::quantile,
-                              probs = p[2], names = FALSE),
-                        nrow = T_post, ncol = J,
-                        dimnames = list(NULL, ind$donor_names))
+    lo_mat <- matrix(apply(delta, c(2L, 3L), stats::quantile,
+                           probs = p[1], names = FALSE),
+                     nrow = T_post, ncol = J, dimnames = list(NULL, donors))
+    up_mat <- matrix(apply(delta, c(2L, 3L), stats::quantile,
+                           probs = p[2], names = FALSE),
+                     nrow = T_post, ncol = J, dimnames = list(NULL, donors))
+  }
+
+  n_pre <- 0L
+  if (!identical(pre, "drop")) {
+    priv <- model$.__enclos_env__$private
+    wide_df <- .makeWide(
+      data      = priv$data,
+      id        = priv$id,
+      time      = priv$time,
+      outcome   = priv$outcome,
+      treatment = priv$treated
+    )
+    pre_data  <- wide_df |>
+      dplyr::filter(!!priv$time < priv$intervention)
+    pre_times <- pre_data[[rlang::as_name(priv$time)]]
+    n_pre     <- length(pre_times)
+
+    if (n_pre > 0L) {
+      if (identical(pre, "zero")) {
+
+        pre_mean <- matrix(0, nrow = n_pre, ncol = J,
+                           dimnames = list(NULL, donors))
+        pre_lo <- pre_up <- pre_mean
+
+      } else {
+
+        y_sim_pre <- priv$y_synth_draws$y_sim_pre       # n_draws x T_pre
+        if (is.null(y_sim_pre) || ncol(y_sim_pre) != n_pre) {
+          stop("Pre-treatment draws 'y_sim_pre' are missing or do not match ",
+               "the pre-period; use pre = 'zero' or pre = 'drop'.")
+        }
+        s_mat  <- .nasc_contamination_draws(model)$s_mat  # n_draws x J
+        Y1_pre <- pre_data[[rlang::as_name(priv$outcome)]]
+
+        # same sign convention as .get_nasc_results(): tau = Y - y_synth
+        tau_pre <- matrix(Y1_pre, nrow = nrow(y_sim_pre), ncol = n_pre,
+                          byrow = TRUE) - y_sim_pre
+        if (nrow(tau_pre) != nrow(s_mat)) {
+          stop("Internal: pre-period draws (", nrow(tau_pre),
+               ") and contamination draws (", nrow(s_mat),
+               ") are misaligned.")
+        }
+
+        # E[tau_pre(t) * s_j] over draws, without materialising the array
+        pre_mean <- crossprod(tau_pre, s_mat) / nrow(tau_pre)
+        dimnames(pre_mean) <- list(NULL, donors)
+
+        if (!is.null(ci)) {
+          p <- .ci_probs(ci)
+          pre_lo <- pre_up <- matrix(NA_real_, nrow = n_pre, ncol = J,
+                                     dimnames = list(NULL, donors))
+          for (t in seq_len(n_pre)) {
+            slice <- tau_pre[, t] * s_mat                 # n_draws x J
+            pre_lo[t, ] <- apply(slice, 2, stats::quantile,
+                                 probs = p[1], names = FALSE)
+            pre_up[t, ] <- apply(slice, 2, stats::quantile,
+                                 probs = p[2], names = FALSE)
+          }
+        } else {
+          pre_lo <- pre_up <- NULL
+        }
+      }
+
+      times    <- c(pre_times, times)
+      mean_mat <- rbind(pre_mean, mean_mat)
+      if (!is.null(ci)) {
+        lo_mat <- rbind(pre_lo, lo_mat)
+        up_mat <- rbind(pre_up, up_mat)
+      }
+    }
+  }
+
+  out <- list(
+    time   = times,
+    donors = donors,
+    mean   = mean_mat,
+    avg    = rowMeans(mean_mat),
+    pre    = pre,
+    n_pre  = n_pre
+  )
+  if (!is.null(ci)) {
+    out$lower <- lo_mat
+    out$upper <- up_mat
   }
   out
 }

@@ -1,6 +1,9 @@
 # Comparison Plots of Multiple NASC Models
 
-nascPlot <- function(models, show_ci = FALSE, indirect = TRUE, show_avg = TRUE) {
+nascPlot <- function(models, show_ci = FALSE, indirect = TRUE, show_avg = TRUE,
+                     indirect_pre = c("zero", "drop", "placebo")) {
+
+  indirect_pre <- match.arg(indirect_pre)
 
   if (!is.list(models) || is.null(names(models))) {
     stop("'models' must be a named list of fitted nascSynth objects.")
@@ -120,10 +123,14 @@ nascPlot <- function(models, show_ci = FALSE, indirect = TRUE, show_avg = TRUE) 
   # Plot indirect (spillover) effects: one thin line per untreated unit,
   # coloured by model; the model's donor average is drawn bold in the same
   # colour. Models fitted without a rho/W carry no spillovers and are skipped.
+  # indirect_pre = "zero" holds the pre-treatment periods at exactly 0
+  # (delta = tau * s, and tau = 0 before treatment); "placebo" shows the
+  # rescaled pre-treatment fit residual instead; "drop" starts the lines at
+  # the intervention.
   if (isTRUE(indirect)) {
     ind_list <- lapply(models, function(m) {
       if (!inherits(m, "nascSynth")) return(NULL)
-      .nasc_indirect_matrix(m)
+      .nasc_indirect_matrix(m, pre = indirect_pre)
     })
     names(ind_list) <- names(models)
     has_ind <- !vapply(ind_list, is.null, logical(1))
@@ -150,14 +157,14 @@ nascPlot <- function(models, show_ci = FALSE, indirect = TRUE, show_avg = TRUE) 
       for (i in seq_len(n_models)) {
         d <- ind_list[[i]]
         if (is.null(d)) next
-        ltype <- if (length(d$time_post) == 1L) "p" else "l"
+        ltype <- if (length(d$time) == 1L) "p" else "l"
         faded <- grDevices::adjustcolor(cols[i], alpha.f = 0.55)
         for (j in seq_along(d$donors)) {
-          graphics::lines(d$time_post, d$mean[, j],
+          graphics::lines(d$time, d$mean[, j],
                           col = faded, lwd = 1, type = ltype, pch = 16)
         }
         if (isTRUE(show_avg)) {
-          graphics::lines(d$time_post, d$avg,
+          graphics::lines(d$time, d$avg,
                           col = cols[i], lwd = 2.5, type = ltype, pch = 16)
         }
       }

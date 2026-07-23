@@ -1057,12 +1057,23 @@ nascSynth <- R6::R6Class(
     #              carries a rho and a W; TRUE/FALSE force it.
     # show_avg   : add the donor-average spillover path to the indirect panel.
     # max_legend : suppress the donor legend beyond this many donors.
-    effectPlot = function(indirect = NULL, show_avg = TRUE, max_legend = 12L) {
+    # indirect_pre : pre-treatment periods of the indirect panel. "zero"
+    #              (default) draws them at exactly 0 -- no treatment has
+    #              happened, so delta = tau * s is zero by construction and
+    #              carries no uncertainty. "placebo" instead shows the
+    #              pre-treatment fit residual carried through the same
+    #              contamination vector (the analogue of the direct panel's
+    #              pre-period, which is a balance diagnostic rather than an
+    #              effect). "drop" starts the lines at the intervention.
+    effectPlot = function(indirect = NULL, show_avg = TRUE, max_legend = 12L,
+                          indirect_pre = c("zero", "drop", "placebo")) {
       if (is.null(private$plot_data)) {
         stop("Run $fit() before calling effectPlot().")
       }
 
       time_name <- rlang::as_name(private$time)
+
+      indirect_pre <- match.arg(indirect_pre)
 
       indirect_default <- isTRUE(private$uses_rho)
       if (is.null(indirect)) indirect <- indirect_default
@@ -1072,7 +1083,7 @@ nascSynth <- R6::R6Class(
 
       ind <- NULL
       if (indirect) {
-        ind <- .nasc_indirect_matrix(self)
+        ind <- .nasc_indirect_matrix(self, pre = indirect_pre)
         if (is.null(ind)) {
           if (indirect_default) {
             warning("Indirect-effect draws unavailable; plotting the direct ",
@@ -1117,7 +1128,7 @@ nascSynth <- R6::R6Class(
       # --- indirect effect, one line per untreated unit -------------------
       J     <- length(ind$donors)
       cols  <- grDevices::hcl.colors(max(J, 2), palette = "Dark 3")[seq_len(J)]
-      ltype <- if (length(ind$time_post) == 1L) "p" else "l"
+      ltype <- if (length(ind$time) == 1L) "p" else "l"
 
       .plot_indirect_panel(
         xlim       = x_all,
@@ -1129,11 +1140,11 @@ nascSynth <- R6::R6Class(
       )
 
       for (j in seq_len(J)) {
-        graphics::lines(ind$time_post, ind$mean[, j],
+        graphics::lines(ind$time, ind$mean[, j],
                         col = cols[j], lwd = 1.6, type = ltype, pch = 16)
       }
       if (isTRUE(show_avg)) {
-        graphics::lines(ind$time_post, ind$avg,
+        graphics::lines(ind$time, ind$avg,
                         col = "black", lwd = 2.5, lty = 2,
                         type = ltype, pch = 17)
       }
