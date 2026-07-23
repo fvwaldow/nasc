@@ -1,6 +1,6 @@
 # Comparison Plots of Multiple NASC Models
 
-nascPlot <- function(models, show_ci = FALSE) {
+nascPlot <- function(models, show_ci = FALSE, indirect = TRUE, show_avg = TRUE) {
 
   if (!is.list(models) || is.null(names(models))) {
     stop("'models' must be a named list of fitted nascSynth objects.")
@@ -115,6 +115,64 @@ nascPlot <- function(models, show_ci = FALSE) {
                    lty    = 1, lwd = 2,
                    bg     = grDevices::adjustcolor("white", alpha.f = 0.85),
                    box.col = "gray70")
+
+
+  # Plot indirect (spillover) effects: one thin line per untreated unit,
+  # coloured by model; the model's donor average is drawn bold in the same
+  # colour. Models fitted without a rho/W carry no spillovers and are skipped.
+  if (isTRUE(indirect)) {
+    ind_list <- lapply(models, function(m) {
+      if (!inherits(m, "nascSynth")) return(NULL)
+      .nasc_indirect_matrix(m)
+    })
+    names(ind_list) <- names(models)
+    has_ind <- !vapply(ind_list, is.null, logical(1))
+
+    if (!any(has_ind)) {
+      message("nascPlot: no model carries indirect effects ",
+              "(bias_correction / nasc_penalty = FALSE); ",
+              "skipping the spillover panel.")
+    } else {
+      if (any(!has_ind)) {
+        message("nascPlot: no indirect effects for model(s): ",
+                paste(names(models)[!has_ind], collapse = ", "), ".")
+      }
+
+      yrng3 <- range(
+        c(0, unlist(lapply(ind_list[has_ind], function(d) as.numeric(d$mean)))),
+        na.rm = TRUE
+      )
+
+      plot(NA, xlim = xrng, ylim = yrng3,
+           xlab = "time", ylab = "indirect effect")
+      graphics::grid(lty = "dotted", col = "gray80")
+
+      for (i in seq_len(n_models)) {
+        d <- ind_list[[i]]
+        if (is.null(d)) next
+        ltype <- if (length(d$time_post) == 1L) "p" else "l"
+        faded <- grDevices::adjustcolor(cols[i], alpha.f = 0.55)
+        for (j in seq_along(d$donors)) {
+          graphics::lines(d$time_post, d$mean[, j],
+                          col = faded, lwd = 1, type = ltype, pch = 16)
+        }
+        if (isTRUE(show_avg)) {
+          graphics::lines(d$time_post, d$avg,
+                          col = cols[i], lwd = 2.5, type = ltype, pch = 16)
+        }
+      }
+
+      graphics::abline(h = 0, lty = 1, col = "black")
+      graphics::abline(v = intervention_time, lty = 3, col = "gray40")
+
+      graphics::legend("topleft",
+                       legend = names(models)[has_ind],
+                       col    = cols[has_ind],
+                       lty    = 1, lwd = 2,
+                       bg     = grDevices::adjustcolor("white", alpha.f = 0.85),
+                       box.col = "gray70")
+    }
+  }
 
   invisible(NULL)
 }

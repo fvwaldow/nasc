@@ -506,7 +506,12 @@
 }
 
 # Plot TE trajectory with CrI
-.plot_tau <- function(data, x, y, ymin, ymax, xintercept) {
+#
+# manage_par = TRUE snapshots and restores the graphics parameters. That
+# snapshot includes `mfg`, so restoring it inside a multi-panel layout
+# (par(mfrow = ...)) would rewind the panel cursor and the next plot would
+# overwrite this one. Callers that set up their own layout pass FALSE.
+.plot_tau <- function(data, x, y, ymin, ymax, xintercept, manage_par = TRUE) {
   data <- as.data.frame(data)
 
   resolve <- function(val, quo) {
@@ -530,9 +535,11 @@
 
   yrng <- range(c(yv, lbv, ubv), na.rm = TRUE)
 
-  op <- graphics::par(no.readonly = TRUE)
-  on.exit(graphics::par(op))
-  graphics::par(bty = "l")
+  if (isTRUE(manage_par)) {
+    op <- graphics::par(no.readonly = TRUE)
+    on.exit(graphics::par(op))
+    graphics::par(bty = "l")
+  }
 
   plot(xv, yv, type = "n", ylim = yrng, xlab = xn, ylab = yn)
   graphics::grid(lty = "dotted", col = "gray80")
@@ -1319,6 +1326,67 @@ summary.nascSynth <- function(object, ...) {
     avg_per_donor  = avg_per_donor,   # n_draws x J
     avg_total      = avg_total        # n_draws
   )
+}
+
+
+# ------------------------------------------------------------------------------
+# .nasc_indirect_matrix: posterior-mean indirect (spillover) effect per donor
+# and post-period -- the per-donor reduction of .nasc_indirect_draws()$delta_arr
+# that tauPlot()/attPlot() collapse to a donor average.
+#
+# Returns a list with
+#   time_post : post-treatment periods (length T_post)
+#   donors    : donor labels (length J)
+#   mean      : T_post x J matrix of posterior means (rows = periods)
+#   avg       : length-T_post donor average (= delta_total / J)
+# plus `lower`/`upper` matrices when `ci` is supplied. Returns NULL when the fit
+# carries no spatial information (uses_rho = FALSE or no W).
+# ------------------------------------------------------------------------------
+.nasc_indirect_matrix <- function(model, ci = NULL) {
+  ind <- tryCatch(.nasc_indirect_draws(model), error = function(e) NULL)
+  if (is.null(ind)) return(NULL)
+
+  delta  <- ind$delta_arr                       # n_draws x T_post x J
+  T_post <- dim(delta)[2L]
+  J      <- dim(delta)[3L]
+
+  mean_mat <- matrix(apply(delta, c(2L, 3L), mean),
+                     nrow = T_post, ncol = J,
+                     dimnames = list(NULL, ind$donor_names))
+
+  out <- list(
+    time_post = ind$time_post,
+    donors    = ind$donor_names,
+    mean      = mean_mat,
+    avg       = rowMeans(mean_mat)
+  )
+
+  if (!is.null(ci)) {
+    p <- .ci_probs(ci)
+    out$lower <- matrix(apply(delta, c(2L, 3L), stats::quantile,
+                              probs = p[1], names = FALSE),
+                        nrow = T_post, ncol = J,
+                        dimnames = list(NULL, ind$donor_names))
+    out$upper <- matrix(apply(delta, c(2L, 3L), stats::quantile,
+                              probs = p[2], names = FALSE),
+                        nrow = T_post, ncol = J,
+                        dimnames = list(NULL, ind$donor_names))
+  }
+  out
+}
+
+
+# Empty panel for indirect-effect trajectories; the caller adds the lines.
+.plot_indirect_panel <- function(xlim, ylim, xintercept,
+                                 xlab = "time",
+                                 ylab = "indirect effect",
+                                 main = NULL) {
+  plot(NA, xlim = xlim, ylim = ylim, xlab = xlab, ylab = ylab)
+  graphics::grid(lty = "dotted", col = "gray80")
+  graphics::abline(h = 0, lty = 1, col = "black")
+  graphics::abline(v = xintercept, lty = 3, col = "gray40")
+  if (!is.null(main)) graphics::title(main = main, font.main = 1)
+  invisible(NULL)
 }
 
 

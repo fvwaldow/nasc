@@ -62,7 +62,7 @@ nascSynth <- R6::R6Class(
                           rho.time.window = NULL,
                           lambda = NULL,
                           lambda_cv_grid = seq(from=0, to=100, by =1),
-                          lambda_train_frac = 0.8) {
+                          lambda_train_frac = 0.7) {
 
       stopifnot(ci_width > 0 & ci_width < 1)
 
@@ -767,10 +767,7 @@ nascSynth <- R6::R6Class(
           } else {
             mean(sampled_rhos, na.rm = TRUE)
           }
-          message(sprintf(
-            "Selecting lambda by hold-out CV (%.0f%% train / %.0f%% validation just before treatment, rho = %.3f)...",
-            100 * private$lambda_train_frac,
-            100 * (1 - private$lambda_train_frac), rho_cv))
+          message("Selecting lambda by hold-out CV")
           cv_res <- .cv_lambda(
             base_data  = base_data,
             rho        = rho_cv,
@@ -780,11 +777,10 @@ nascSynth <- R6::R6Class(
           lt_used <- cv_res$lambda
           private$lambda_cv_table <- cv_res$table
           message(sprintf(
-            "CV-selected lambda = %.4g (validation RMSE = %.4g; train = periods 1-%d, validation = %d-%d)",
+            "lambda = %.4g, validation RMSE = %.4g; train = periods 1-%d, validation = %d-%d)",
             lt_used, cv_res$rmse, max(cv_res$train),
             min(cv_res$validation), max(cv_res$validation)))
         }
-        message(sprintf("Penalty calibrated at sigma_ref = %.4g", base_data$sigma_ref))
         private$lambda_used <- lt_used
         base_data$lambda    <- lt_used
 
@@ -1053,22 +1049,112 @@ nascSynth <- R6::R6Class(
       invisible(NULL)
     },
 
-    # Plot estimated direct treatment effect
-    effectPlot = function(indirect = NULL) {
+    # Plot estimated direct treatment effect, optionally alongside a second
+    # panel holding the indirect (spillover) effect of every untreated unit --
+    # one line per donor over the post-treatment periods.
+    #
+    # indirect   : NULL (default) uses the indirect panel whenever the fit
+    #              carries a rho and a W; TRUE/FALSE force it.
+    # show_avg   : add the donor-average spillover path to the indirect panel.
+    # max_legend : suppress the donor legend beyond this many donors.
+    effectPlot = function(indirect = NULL, show_avg = TRUE, max_legend = 12L) {
       if (is.null(private$plot_data)) {
         stop("Run $fit() before calling effectPlot().")
       }
 
       time_name <- rlang::as_name(private$time)
 
+      indirect_default <- isTRUE(private$uses_rho)
+      if (is.null(indirect)) indirect <- indirect_default
+      stopifnot(is.logical(indirect), length(indirect) == 1L,
+                is.logical(show_avg), length(show_avg) == 1L,
+                is.numeric(max_legend), length(max_legend) == 1L)
+
+      ind <- NULL
+      if (indirect) {
+        ind <- .nasc_indirect_matrix(self)
+        if (is.null(ind)) {
+          if (indirect_default) {
+            warning("Indirect-effect draws unavailable; plotting the direct ",
+                    "effect only.")
+          }
+          indirect <- FALSE
+        }
+      }
+
+      if (!indirect) {
+        .plot_tau(
+          data       = private$plot_data,
+          x          = time_name,
+          y          = "tau",
+          ymin       = "tau_LB",
+          ymax       = "tau_UB",
+          xintercept = private$intervention
+        )
+        return(invisible(NULL))
+      }
+
+      op <- graphics::par(no.readonly = TRUE)
+      on.exit(graphics::par(op))
+      graphics::par(mfrow = c(1, 2), mar = c(4, 5, 2.4, 1), bty = "l")
+
+      # Shared x-range so the two panels line up.
+      x_all <- range(as.data.frame(private$plot_data)[[time_name]],
+                     na.rm = TRUE)
+
+      # --- direct effect -------------------------------------------------
       .plot_tau(
         data       = private$plot_data,
         x          = time_name,
         y          = "tau",
         ymin       = "tau_LB",
         ymax       = "tau_UB",
-        xintercept = private$intervention
+        xintercept = private$intervention,
+        manage_par = FALSE
       )
+      graphics::title(main = expression(tau ~ "(direct)"), font.main = 1)
+
+      # --- indirect effect, one line per untreated unit -------------------
+      J     <- length(ind$donors)
+      cols  <- grDevices::hcl.colors(max(J, 2), palette = "Dark 3")[seq_len(J)]
+      ltype <- if (length(ind$time_post) == 1L) "p" else "l"
+
+      .plot_indirect_panel(
+        xlim       = x_all,
+        ylim       = range(c(0, ind$mean), na.rm = TRUE),
+        xintercept = private$intervention,
+        xlab       = time_name,
+        ylab       = expression(delta[j] ~ "(indirect)"),
+        main       = expression(delta[j] ~ "(indirect, per donor)")
+      )
+
+      for (j in seq_len(J)) {
+        graphics::lines(ind$time_post, ind$mean[, j],
+                        col = cols[j], lwd = 1.6, type = ltype, pch = 16)
+      }
+      if (isTRUE(show_avg)) {
+        graphics::lines(ind$time_post, ind$avg,
+                        col = "black", lwd = 2.5, lty = 2,
+                        type = ltype, pch = 17)
+      }
+
+      if (J <= max_legend) {
+        graphics::legend(
+          "topleft",
+          legend  = c(ind$donors, if (show_avg) "donor average"),
+          col     = c(cols,       if (show_avg) "black"),
+          lty     = c(rep(1, J),  if (show_avg) 2),
+          lwd     = c(rep(1.6, J), if (show_avg) 2.5),
+          ncol    = if (J > 6) 2 else 1,
+          cex     = 0.75,
+          bg      = grDevices::adjustcolor("white", alpha.f = 0.85),
+          box.col = "gray70"
+        )
+      } else {
+        message(sprintf(
+          "effectPlot: %d donors; legend omitted (raise 'max_legend' to show it).",
+          J))
+      }
 
       invisible(NULL)
     },
