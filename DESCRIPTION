@@ -4,7 +4,7 @@ Version: 0.0.0.9000
 Authors@R: 
     person("Frederik", "von Waldow", , "f.vonwaldow@uni-bonn.de", role = c("aut", "cre"),
            comment = c(ORCID = "0009-0009-4269-2088"))
-Description: Implements the Network-Aware Synthetic Control (NASC) estimator when SUTVA is violated due to network or spatial interference. The package utilizes a modular Bayesian framework to estimate treatment effects and network dependencies while accounting for spillover magnitude and direction. Besides bias correction it features a novel weight regularization that discounts donor units based on their contamination risk. Supports Stan-based MCMC sampling for robust inference, covariate adjustment, and automated construction of network-aware counterfactuals using a priori known row-standardized spatial weight matrices.
+Description: Implements the Network-Aware Synthetic Control (NASC) estimator when SUTVA is violated due to network or spatial interference. The package utilizes a modular Bayesian framework to estimate treatment effects and network dependencies while accounting for spillover magnitude and direction. Besides bias correction it features a novel weight regularization that discounts donor units based on their contamination risk, with the penalty strength either fixed by the user or selected by hold-out cross-validation. Supports Stan-based MCMC sampling for robust inference, Synth-style covariate matching with user-specified aggregation operators and special predictors, and automated construction of network-aware counterfactuals using a priori known row-standardized spatial weight matrices.
 License: MIT + file LICENSE
 Encoding: UTF-8
 URL: https://github.com/fvwaldow/nasc
@@ -23,13 +23,13 @@ Imports:
     dplyr,
     tidyr,
     tibble,
+    future,
     furrr,
+    parallel,
     graphics,
     grDevices, 
     stats
 Suggests:
-    future,
-    progressr,
     igraph
 LinkingTo: 
     BH (>= 1.66.0),

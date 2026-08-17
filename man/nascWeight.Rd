@@ -1,7 +1,6 @@
-% Handwritten Manual
 \name{nascWeight}
 \alias{nascWeight}
-\title{Compare Posterior Donor-Weight Distributions Across Models}
+\title{Posterior Donor-Weight Distributions Across Models Plot}
 \usage{
 nascWeight(
   models,
@@ -12,56 +11,35 @@ nascWeight(
 )
 }
 \arguments{
-\item{models}{A named list of fitted \code{nascSynth} objects. The
-list names are used as legend labels and must be unique.}
+\item{models}{Named list of fitted \code{nascSynth} objects; names must be
+unique and are used as legend labels.}
 
-\item{overlap}{Numeric in \code{[0, 1)}. Fraction of vertical overlap
-between adjacent donor rows. \code{0} reproduces a non-overlapping
-layout; \code{0.5} (default) makes each ridge reach halfway into
-the row above. See \code{$weightDraws()} for the same parameter.}
+\item{overlap}{Numeric in \code{[0, 1)}. Vertical overlap between adjacent
+donor rows. Default \code{0.5}.}
 
-\item{scale}{Numeric > 0. Multiplicative height of every ridge
-relative to the baseline step. Default \code{1.4}.}
+\item{scale}{Numeric > 0. Ridge height relative to the row step. Default
+\code{1.4}.}
 
-\item{fill_alpha}{Numeric in \code{(0, 1]}. Alpha applied to the
-fill colours; lower values make overlapping model ridges more
-transparent. Default \code{0.45}, calibrated for readable overlap
-at 2-4 models.}
+\item{fill_alpha}{Numeric in \code{(0, 1]}. Fill transparency; lower values
+help when many models overlap. Default \code{0.45}.}
 
-\item{max_donors}{Integer or \code{NULL}. If a positive integer,
-restrict the plot to the \code{max_donors} donors with the
-largest IDs (i.e. drop the smallest IDs from the bottom of the
-plot). Default \code{NULL} (plot all donors).}
+\item{max_donors}{Integer or \code{NULL}. Keep only the \code{max_donors}
+donors at the top of the plot (the largest IDs). Default \code{NULL} (all).}
 }
 \value{
-Invisibly returns a tibble with one row per (donor, model)
-combination giving the posterior mean weight, standard deviation,
-and the share of draws above \code{1e-3}. Rows are ordered to
-match the plot, top-to-bottom (largest donor ID first).
+Invisibly, a tibble with one row per donor-model pair giving the
+posterior mean weight, its SD, and the share of draws above \code{1e-3},
+ordered as plotted.
 }
 \description{
-Ridgeline plot of posterior donor-weight densities, with one row per
-donor and one overlaid translucent density per model. Designed as the
-multi-model counterpart of \code{$weightDraws()} and as a companion
-to \code{\link{nascPlot}}: model colours are drawn from the same
-\code{hcl.colors(palette = "Dark 3")} palette so that lines in
-\code{nascPlot()} and densities here can be cross-referenced at a
-glance.
+Ridgeline plot of posterior donor-weight densities: one row per donor, one
+translucent density per model. Multi-model counterpart of
+\code{$weightDraws()}, sharing the colour palette of \code{\link{nascPlot}}.
 }
 \details{
-Donors are listed on the y-axis ordered by donor identifier, with
-the largest ID at the top and the smallest at the bottom. Numeric
-identifiers (or numeric-as-character such as \code{"1"}, \code{"2"},
-..., \code{"20"}) are sorted numerically so \code{"20"} sits above
-\code{"3"}; otherwise the sort falls back to lexicographic order.
-When models use different donor pools, the union of donors is shown
-and a model that does not include a particular donor simply has no
-density drawn in that row.
-
-Within each row, ridges from different models are drawn as
-translucent overlapping polygons in the \code{nascPlot()} colour
-palette. Reduce \code{fill_alpha} when many models are compared so
-the colours remain distinguishable.
+Donors are ordered by identifier with the largest ID on top, sorted
+numerically where possible and lexicographically otherwise. Across differing
+donor pools the union is shown; a model missing a donor leaves that row empty.
 }
 \seealso{
 \code{\link{nascPlot}} for the time-series counterpart.

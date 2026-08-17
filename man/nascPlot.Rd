@@ -1,32 +1,47 @@
-% Handwritten Manual
 \name{nascPlot}
 \alias{nascPlot}
-\title{Compare Multiple NASC Models}
+\title{Multiple NASC Model Plot}
 \usage{
-nascPlot(models, show_ci = FALSE)
+nascPlot(
+  models,
+  show_ci = FALSE,
+  indirect = TRUE,
+  show_avg = TRUE,
+  indirect_pre = c("zero", "drop", "placebo")
+)
 }
 \arguments{
-\item{models}{A named list of fitted \code{nascSynth} objects. The names of
-the list are used as the legend labels.}
+\item{models}{Named list of fitted \code{nascSynth} objects; the names are the
+legend labels.}
 
-\item{show_ci}{Logical. If \code{TRUE}, adds shaded credible-interval bands
-(\code{LB}, \code{UB}, \code{tau_LB}, \code{tau_UB}). Defaults to
-\code{FALSE} because overlapping bands can be hard to read.}
+\item{show_ci}{Adds shaded credible-interval bands. Default
+\code{FALSE}, since overlapping bands are hard to read.}
+
+\item{indirect}{Adds a third panel with the indirect (spillover)
+effects. Models without a network are skipped with a message. Default
+\code{TRUE}.}
+
+\item{show_avg}{Draws each model's donor average as a bold line in the
+spillover panel. Default \code{TRUE}.}
+
+\item{indirect_pre}{Pre-treatment display in the spillover panel:
+\code{"zero"} holds the pre-period at 0 (default, since
+\eqn{\delta = s\tau} and \eqn{\tau = 0} pre-treatment), \code{"placebo"}
+shows the rescaled pre-treatment residual, \code{"drop"} starts at the
+intervention.}
 }
 \value{
-Invisibly returns \code{NULL}. Called for its side effect of
-drawing plots.
+Invisibly \code{NULL}; called for its plots.
 }
 \description{
-Produces comparative base R plots overlaying the results of multiple fitted
-\code{nascSynth} objects. Useful for comparing configurations such as
-Conventional SC, Bias-Corrected SC, NASC, and Fully NASC.
+Overlays the outcome paths, direct effects and (optionally) spillovers of
+several fitted \code{nascSynth} objects, e.g. conventional SC,
+bias-corrected SC and NASC.
 }
 \details{
-Draws plots directly to the active graphics device using base R. Two plots
-are produced in sequence (synthetic, then direct effect). Use
-\code{par(mfrow = c(1, 2))} or \code{dev.new()} between calls if you want
-them side by side or in separate windows.
+Panels are drawn in sequence on the active device. Set
+\code{par(mfrow = ...)} beforehand to arrange them. Model colours come from
+\code{hcl.colors(palette = "Dark 3")}, shared with \code{\link{nascWeight}}.
 }
 \seealso{
 \code{\link{nascWeight}} for the donor-weight counterpart.
