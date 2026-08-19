@@ -182,7 +182,6 @@ contaminationGraph <- function(model,
 }
 
 
-
 # Network graph by direct and indirect treatment effects
 
 effectGraph <- function(model,

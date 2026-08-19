@@ -34,11 +34,11 @@ nascSynth <- R6::R6Class(
     predictor_labels = NULL,
     rho_covariates = NULL,
     rho_time_window = NULL,
-    lambda = NULL,        # user-fixed penalty strength (NULL => CV)
-    lambda_cv_grid = NULL,      # candidate lambda values for CV
-    lambda_train_frac = NULL,   # share of the pre-period used for training
-    lambda_used = NULL,   # value actually used in Step 2
-    lambda_cv_table = NULL      # CV results (grid x fold RMSE)
+    lambda = NULL,
+    lambda_cv_grid = NULL,
+    lambda_train_frac = NULL,
+    lambda_used = NULL,
+    lambda_cv_table = NULL
   ),
   active = list(
     plotData = function() { return(private$plot_data) },
@@ -405,9 +405,6 @@ nascSynth <- R6::R6Class(
 
       n_pre_real <- nrow(pre_data)
 
-      # `donor_ids` is needed by .build_predictor_matrix(); set it before the
-      # augmentation step so both the NASC and non-NASC branches use the same
-      # column ordering.
       donor_ids  <- colnames(X_pred)
       treated_id <- as.character(private$treated_ids)
       private$donor_ids <- donor_ids
@@ -753,13 +750,9 @@ nascSynth <- R6::R6Class(
           v_cov               = if (K_cov_step2 > 0L) as.array(v_cov_vec) else numeric(0)
         )
 
-        # Reference noise scale: calibrates the penalty and keeps it out of
-        # sigma's conditional. Computed once from the unpenalized fit and used
-        # both by CV and by the final sampler, so the selected lambda is exactly
-        # the lambda deployed.
         base_data$sigma_ref <- .compute_sigma_ref(base_data)
 
-        # --- lambda: user-fixed or CV-selected -------------------------
+        #lambda: pre-specified or hold-out CV
         lt_used <- private$lambda
         if (is.null(lt_used)) {
           rho_cv <- if (length(sampled_rhos) == 1L && !is.na(sampled_rhos[1])) {
@@ -854,8 +847,8 @@ nascSynth <- R6::R6Class(
             post_data |> dplyr::pull(!!private$outcome))),
           use_bias_correction = as.integer(private$bias_correction),
           use_penalty         = 0L,
-          lambda        = 1.0,  # required by Stan data block; unused when use_penalty = 0
-          sigma_ref     = 1.0,  # ditto
+          lambda        = 1.0,
+          sigma_ref     = 1.0,
           K_cov               = N_aug,
           X_cov0              = X_cov0_mat_nop,
           X_cov1              = if (N_aug > 0L) as.array(X_cov1_vec_nop) else numeric(0),
@@ -1049,22 +1042,7 @@ nascSynth <- R6::R6Class(
       invisible(NULL)
     },
 
-    # Plot estimated direct treatment effect, optionally alongside a second
-    # panel holding the indirect (spillover) effect of every untreated unit --
-    # one line per donor over the post-treatment periods.
-    #
-    # indirect   : NULL (default) uses the indirect panel whenever the fit
-    #              carries a rho and a W; TRUE/FALSE force it.
-    # show_avg   : add the donor-average spillover path to the indirect panel.
-    # max_legend : suppress the donor legend beyond this many donors.
-    # indirect_pre : pre-treatment periods of the indirect panel. "zero"
-    #              (default) draws them at exactly 0 -- no treatment has
-    #              happened, so delta = tau * s is zero by construction and
-    #              carries no uncertainty. "placebo" instead shows the
-    #              pre-treatment fit residual carried through the same
-    #              contamination vector (the analogue of the direct panel's
-    #              pre-period, which is a balance diagnostic rather than an
-    #              effect). "drop" starts the lines at the intervention.
+    # Plot estimated TE
     effectPlot = function(indirect = NULL, show_avg = TRUE, max_legend = 12L,
                           indirect_pre = c("zero", "drop", "placebo")) {
       if (is.null(private$plot_data)) {
@@ -1109,11 +1087,10 @@ nascSynth <- R6::R6Class(
       on.exit(graphics::par(op))
       graphics::par(mfrow = c(1, 2), mar = c(4, 5, 2.4, 1), bty = "l")
 
-      # Shared x-range so the two panels line up.
       x_all <- range(as.data.frame(private$plot_data)[[time_name]],
                      na.rm = TRUE)
 
-      # --- direct effect -------------------------------------------------
+      # direct TE
       .plot_tau(
         data       = private$plot_data,
         x          = time_name,
@@ -1125,7 +1102,7 @@ nascSynth <- R6::R6Class(
       )
       graphics::title(main = expression(tau ~ "(direct)"), font.main = 1)
 
-      # --- indirect effect, one line per untreated unit -------------------
+      # indirect TE
       J     <- length(ind$donors)
       cols  <- grDevices::hcl.colors(max(J, 2), palette = "Dark 3")[seq_len(J)]
       ltype <- if (length(ind$time) == 1L) "p" else "l"
@@ -1489,14 +1466,13 @@ nascSynth <- R6::R6Class(
       invisible(NULL)
     },
 
-    # Plot of the posterior weight density per donor
-    # CV table and selected penalty strength (NULL until $fit() with
-    # nasc_penalty = TRUE and lambda = NULL has been run).
+    # CV summary
     lambdaCV = function() {
       list(lambda = private$lambda_used,
            table        = private$lambda_cv_table)
     },
 
+    # Plot of the posterior weight density per donor
     weightDraws = function(overlap = 0.5, scale = 1.4, fill_alpha = 0.85) {
       if (is.null(private$fitted)) stop("Run $fit() before calling weightDraws().")
 

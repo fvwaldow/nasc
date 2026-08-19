@@ -506,11 +506,6 @@
 }
 
 # Plot TE trajectory with CrI
-#
-# manage_par = TRUE snapshots and restores the graphics parameters. That
-# snapshot includes `mfg`, so restoring it inside a multi-panel layout
-# (par(mfrow = ...)) would rewind the panel cursor and the next plot would
-# overwrite this one. Callers that set up their own layout pass FALSE.
 .plot_tau <- function(data, x, y, ymin, ymax, xintercept, manage_par = TRUE) {
   data <- as.data.frame(data)
 
@@ -786,9 +781,9 @@
 
 
   # Indirect effects
-  indirect_per_period_avg   <- NULL  # per-period donor-average spillover
-  indirect_per_donor        <- NULL  # average across periods per donor
-  indirect_avg              <- NULL  # average across periods of donor-average spillover
+  indirect_per_period_avg   <- NULL
+  indirect_per_donor        <- NULL
+  indirect_avg              <- NULL
   if (isTRUE(parts$uses_rho) && !is.null(parts$model)) {
     ind <- tryCatch(
       .nasc_indirect_draws(parts$model),
@@ -799,10 +794,7 @@
       avg_per_donor_dr  <- ind$avg_per_donor                # n_draws x J
       J                 <- ncol(avg_per_donor_dr)
 
-      # Per-period donor-average spillover
       delta_avg_draws <- delta_total_draws / J
-
-      # average indirect effect
       avg_indirect_draws <- rowMeans(delta_avg_draws)         # n_draws
 
       indirect_per_period_avg <- tibble::tibble(
@@ -822,7 +814,6 @@
         upper = apply(avg_per_donor_dr, 2, \(x) stats::quantile(x, .ci_probs(ci)[2], names = FALSE)),
         p_pos = apply(avg_per_donor_dr, 2, \(x) mean(x > 0))
       )
-      # Sort by descending unit index
       indirect_per_donor <- indirect_per_donor[
         rev(seq_len(nrow(indirect_per_donor))), , drop = FALSE
       ]
@@ -1329,33 +1320,8 @@ summary.nascSynth <- function(object, ...) {
 }
 
 
-# ------------------------------------------------------------------------------
-# .nasc_indirect_matrix: posterior-mean indirect (spillover) effect per donor
-# and period -- the per-donor reduction of .nasc_indirect_draws()$delta_arr
-# that tauPlot()/attPlot() collapse to a donor average.
-#
-# `pre` controls the pre-treatment periods:
-#   "zero"    (default) delta_j(t) = tau(t) * s_j with tau(t) = 0 before
-#             treatment, so the spillover is EXACTLY zero. This is imposed by
-#             the structure, not estimated -- there is no uncertainty to show.
-#   "drop"    post-treatment periods only.
-#   "placebo" the pre-treatment fit residual carried through the same
-#             contamination vector, delta_j(t) = tau_pre(t) * s_j. This is the
-#             exact analogue of what the DIRECT panel shows before treatment
-#             (a posterior-predictive residual from y_sim_pre, i.e. a balance
-#             diagnostic rather than an effect), but since s_j is a constant
-#             per donor it is that same residual rescaled -- it carries no
-#             information the direct panel does not already show.
-#
-# Returns a list with
-#   time   : periods (length T)
-#   donors : donor labels (length J)
-#   mean   : T x J matrix of posterior means (rows = periods)
-#   avg    : length-T donor average
-#   pre    : the `pre` mode used
-# plus `lower`/`upper` matrices when `ci` is supplied. Returns NULL when the fit
-# carries no spatial information (uses_rho = FALSE or no W).
-# ------------------------------------------------------------------------------
+
+# posterior-mean indirect TE per donor
 .nasc_indirect_matrix <- function(model, ci = NULL,
                                   pre = c("zero", "drop", "placebo")) {
   pre <- match.arg(pre)
@@ -1416,7 +1382,6 @@ summary.nascSynth <- function(object, ...) {
         s_mat  <- .nasc_contamination_draws(model)$s_mat  # n_draws x J
         Y1_pre <- pre_data[[rlang::as_name(priv$outcome)]]
 
-        # same sign convention as .get_nasc_results(): tau = Y - y_synth
         tau_pre <- matrix(Y1_pre, nrow = nrow(y_sim_pre), ncol = n_pre,
                           byrow = TRUE) - y_sim_pre
         if (nrow(tau_pre) != nrow(s_mat)) {
@@ -1425,7 +1390,6 @@ summary.nascSynth <- function(object, ...) {
                ") are misaligned.")
         }
 
-        # E[tau_pre(t) * s_j] over draws, without materialising the array
         pre_mean <- crossprod(tau_pre, s_mat) / nrow(tau_pre)
         dimnames(pre_mean) <- list(NULL, donors)
 
@@ -1484,11 +1448,7 @@ summary.nascSynth <- function(object, ...) {
 }
 
 
-# ------------------------------------------------------------------------------
-# .simplex_project: exact Euclidean projection onto the probability simplex
-# (Duchi, Shalev-Shwartz, Singer & Chandra, 2008). Always returns a valid
-# simplex point.
-# ------------------------------------------------------------------------------
+# Euclidean projection onto the probability simplex
 .simplex_project <- function(v) {
   n   <- length(v)
   u   <- sort(v, decreasing = TRUE)
@@ -1500,21 +1460,7 @@ summary.nascSynth <- function(object, ...) {
   pmax(v - css[k] / k, 0)
 }
 
-# ------------------------------------------------------------------------------
-# .penalized_sc_weights: MAP donor weights of the Step-2 model, solved exactly.
-#
-# The w-dependent part of the Stan log-posterior is
-#   -(1/sigma^2) * [ 0.5*||Xs w - ys||^2
-#                    + 0.5*sum_k v_k (C1k - C0k'w)^2
-#                    + lambda*n_eff*(w's_abs) ]
-# so sigma is a positive scale factor and CANCELS from argmin_w: the MAP weights
-# are the minimizer of the bracket, a convex QP over the simplex. Solved here by
-# FISTA with exact simplex projection. This is deterministic, needs no sigma and
-# no Stan optimizer, and ALWAYS returns a valid simplex point -- which is why the
-# CV table can no longer contain NA rows. (rstan::optimizing could fail its line
-# search whenever the design has an exactly flat direction, e.g. duplicated donor
-# columns or lambda = 0 with T0 < J, leaving NA behind.)
-# ------------------------------------------------------------------------------
+# MAP donor weights of the Step-2 model
 .penalized_sc_weights <- function(Xs, ys, C0, C1, v_cov, s_abs, lam, n_eff,
                                   max_iter = 5000L, tol = 1e-11) {
   J <- ncol(Xs)
@@ -1545,17 +1491,7 @@ summary.nascSynth <- function(object, ...) {
   w
 }
 
-# ------------------------------------------------------------------------------
-# .compute_sigma_ref: reference noise scale used to calibrate the penalty.
-#
-# The residual scale of the UNPENALIZED (lambda = 0) simplex fit over the full
-# pre-period, on the same standardized scale as the Stan model's sigma_sc, and
-# including the covariate-matching terms so it matches sigma's MLE there:
-#   sigma_ref^2 = ( SSR + sum_k v_k (C1k - C0k'w0)^2 ) / n_eff
-# Floored at the model's sigma_floor. Passed to Stan as data, so the penalty is
-# calibrated at the scale the data actually exhibit while leaving sigma's own
-# conditional untouched.
-# ------------------------------------------------------------------------------
+# reference noise scale used to calibrate the penalty.
 .compute_sigma_ref <- function(base_data, sigma_floor = 0.05) {
   J  <- base_data$J
   T0 <- base_data$T0
@@ -1604,29 +1540,7 @@ summary.nascSynth <- function(object, ...) {
   max(sigma_floor, out)
 }
 
-# ------------------------------------------------------------------------------
-# .cv_lambda: single hold-out validation for the NASC penalty strength lambda.
-#
-# Partition: ONE split of the pre-period. The first `train_frac` of the
-# pre-periods are the training window; the remaining periods -- the block
-# IMMEDIATELY BEFORE the intervention -- are the validation block. With
-# T0 = 20 and train_frac = 0.8 that is train 1-16, validate 17-20.
-#
-# Rationale: the estimator's real task is to extrapolate the treated unit from
-# the pre-period into the post-period, so the validation block should be the
-# periods adjacent to treatment. Earlier folds of a rolling-origin scheme
-# validate on periods far from the intervention and dilute that signal.
-#
-# Prediction uses the raw weighted donor combination (no bias correction): there
-# is no treatment in the pre-period, so contamination-free forecasting accuracy
-# is the right criterion.
-#
-# base_data: assembled Step-2 data list (penalty branch), BEFORE `lambda` is set.
-# rho:       single rho for the contamination vector (exogenous, or the Step-1
-#            posterior mean).
-# grid:      candidate lambda values.
-# train_frac: share of the pre-period used for training.
-# ------------------------------------------------------------------------------
+# hold-out CV for the NASC penalty
 .cv_lambda <- function(base_data, rho,
                        grid       = seq(from=0,to=100,by=1),
                        train_frac = 0.8,
@@ -1635,7 +1549,6 @@ summary.nascSynth <- function(object, ...) {
   J  <- base_data$J
   T0 <- base_data$T0
 
-  # ---- single hold-out split, validation adjacent to the intervention --------
   tr_end <- max(2L, floor(train_frac * T0))
   if (tr_end >= T0) tr_end <- T0 - 1L
   ho_idx <- (tr_end + 1L):T0
@@ -1646,12 +1559,9 @@ summary.nascSynth <- function(object, ...) {
   y_tr    <- as.numeric(Y_panel[J + 1L, ])            # treated pre path
   X_don   <- t(Y_panel[seq_len(J), , drop = FALSE])   # T0 x J
 
-  # contamination vector, same construction as the Stan model
   s_abs <- abs(as.numeric(rho * solve(diag(J) - rho * base_data$W_J,
                                       base_data$w_J1)))
 
-  # standardization exactly as in the Stan transformed-data block, computed on
-  # the TRAINING window only
   y_train <- y_tr[seq_len(tr_end)]
   mean_y  <- mean(y_train)
   sd_y    <- stats::sd(y_train)
@@ -1676,9 +1586,8 @@ summary.nascSynth <- function(object, ...) {
     v_cov <- numeric(0)
   }
 
-  n_eff <- tr_end + sum(v_cov)          # n_eff on the TRAINING window
+  n_eff <- tr_end + sum(v_cov)
 
-  # ---- evaluate the grid on the hold-out block ------------------------------
   X_ho <- X_don[ho_idx, , drop = FALSE]
   y_ho <- y_tr[ho_idx]
 
@@ -1695,9 +1604,6 @@ summary.nascSynth <- function(object, ...) {
     resid     <- y_ho - as.numeric(X_ho %*% w)
     rmse[g]   <- sqrt(mean(resid^2))
     contam[g] <- sum(w * s_abs)
-    # hold-out SE of the RMSE, delta method from the squared errors. With a
-    # single fold there is no across-fold SD to use, so the one-SE rule draws
-    # its scale from within the validation block instead.
     e2 <- resid^2
     se[g] <- if (length(e2) > 1L && mean(e2) > 0)
       (stats::sd(e2) / sqrt(length(e2))) / (2 * sqrt(mean(e2))) else 0
@@ -1712,10 +1618,6 @@ summary.nascSynth <- function(object, ...) {
                 validation = ho_idx, table = tbl))
   }
 
-  # One-standard-error rule, breaking ties toward MORE regularization: among
-  # candidates within one hold-out SE of the best RMSE, take the largest lambda.
-  # The pre-fit curve is often nearly flat in lambda, so a plain argmin would
-  # select lambda ~ 0 on noise alone.
   g_min  <- which.min(rmse)
   thresh <- if (isTRUE(one_se)) rmse[g_min] + se[g_min] else rmse[g_min]
   g_pick <- max(which(is.finite(rmse) & rmse <= thresh))

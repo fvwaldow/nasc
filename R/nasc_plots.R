@@ -82,7 +82,7 @@ nascPlot <- function(models, show_ci = FALSE, indirect = TRUE, show_avg = TRUE,
                    box.col = "gray70")
 
 
-  # Plot Direct treatment effect (tau)
+  # Plot Direct treatment TE
   y_vals2 <- unlist(lapply(combined_list, function(d) d$tau))
   if (isTRUE(show_ci)) {
     y_vals2 <- c(y_vals2,
@@ -120,13 +120,7 @@ nascPlot <- function(models, show_ci = FALSE, indirect = TRUE, show_avg = TRUE,
                    box.col = "gray70")
 
 
-  # Plot indirect (spillover) effects: one thin line per untreated unit,
-  # coloured by model; the model's donor average is drawn bold in the same
-  # colour. Models fitted without a rho/W carry no spillovers and are skipped.
-  # indirect_pre = "zero" holds the pre-treatment periods at exactly 0
-  # (delta = tau * s, and tau = 0 before treatment); "placebo" shows the
-  # rescaled pre-treatment fit residual instead; "drop" starts the lines at
-  # the intervention.
+  # Plot indirect TE
   if (isTRUE(indirect)) {
     ind_list <- lapply(models, function(m) {
       if (!inherits(m, "nascSynth")) return(NULL)

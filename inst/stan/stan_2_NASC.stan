@@ -53,25 +53,6 @@ transformed data {
   real n_eff = T0 + sum(v_cov);
 
   real sigma_floor = 0.05;
-
-  // Penalty strength, calibrated at the REFERENCE noise scale sigma_ref (data,
-  // = the residual scale of the unpenalized simplex fit) rather than at the
-  // sampled sigma_sc. lambda is fixed by CV upstream, so lambda_tilde depends on
-  // DATA ONLY: it lives here in transformed data, is computed once as a plain
-  // double, and never enters the autodiff tape or the per-draw output. (In
-  // transformed parameters it would be promoted to a var with zero derivatives
-  // and written out every draw.) With lambda fixed, no ETDir normalizing
-  // constant is needed: the model is a valid penalized (Gibbs) posterior.
-  //
-  // Why not square(sigma_sc): that makes the penalty term sigma-dependent, so it
-  // enters sigma's own conditional and inflates it --
-  //   sigma^2 = (SSR + 2*lambda*n_eff*(w's)) / n_eff
-  // -- which corrupts sigma as an estimate of pre-fit noise and widens every
-  // predictive interval. With sigma_ref the penalty drops out of sigma's
-  // conditional entirely (sigma^2 = SSR / n_eff, as in the unpenalized model)
-  // while remaining calibrated in likelihood-precision units at the scale the
-  // data actually exhibit. The CV-selected lambda is then exactly the lambda
-  // deployed, since CV calibrates at the same reference scale.
   real lambda_tilde = (lambda * n_eff) / square(sigma_ref);
 }
 parameters {
@@ -79,7 +60,6 @@ parameters {
   real<lower=0> sigma_raw;     // free part of the likelihood SD
 }
 transformed parameters {
-  // Soft floor
   real<lower=0> sigma_sc = sqrt(square(sigma_floor) + square(sigma_raw));
 }
 model {
@@ -113,6 +93,6 @@ generated quantities {
   real lambda_tilde_out       = lambda_tilde;
   real lambda_out = lambda;
   real n_eff_out        = n_eff;
-  real sigma_sc_out     = sigma_sc;   // monitor: should sit near sigma_floor
+  real sigma_sc_out     = sigma_sc;
   real sigma_ref_out    = sigma_ref;
 }
